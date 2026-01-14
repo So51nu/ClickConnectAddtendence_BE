@@ -224,7 +224,7 @@ class MeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "email", "full_name", "is_verified", "is_active", "phone", "employee_code", "department", "designation"]
+        fields = ["id", "email", "full_name", "is_verified", "is_active", "phone", "employee_code", "department", "designation","is_staff","is_superuser"]
 
     def get_phone(self, obj):
         return getattr(getattr(obj, "profile", None), "phone", "")
@@ -237,3 +237,158 @@ class MeSerializer(serializers.ModelSerializer):
 
     def get_designation(self, obj):
         return getattr(getattr(obj, "profile", None), "designation", "")
+
+from rest_framework import serializers
+from django.utils import timezone
+from django.db import transaction
+from django.utils.timezone import localdate
+import math
+
+from .models import OfficeQR, Attendance
+
+
+def haversine_m(lat1, lon1, lat2, lon2) -> float:
+    """
+    Returns distance in meters between two lat/lng points.
+    """
+    R = 6371000.0  # meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+
+    a = (math.sin(dphi / 2) ** 2) + math.cos(phi1) * math.cos(phi2) * (math.sin(dlambda / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+class AttendanceMarkSerializer(serializers.Serializer):
+    """
+    action: CHECKIN or CHECKOUT
+    qr_token: scanned from QR (static)
+    lat/lng/accuracy: from device
+    """
+    action = serializers.ChoiceField(choices=["CHECKIN", "CHECKOUT"])
+    qr_token = serializers.CharField(max_length=80)
+
+    lat = serializers.FloatField()
+    lng = serializers.FloatField()
+    accuracy_m = serializers.FloatField(required=False)
+
+    def validate(self, attrs):
+        user = self.context["request"].user
+
+        if not user.is_verified:
+            raise serializers.ValidationError({"detail": "Email not verified."})
+        if not user.is_active:
+            raise serializers.ValidationError({"detail": "Account inactive."})
+
+        qr_token = attrs["qr_token"].strip()
+        qr = OfficeQR.objects.select_related("office").filter(qr_token=qr_token, is_active=True, office__is_active=True).first()
+        if not qr:
+            raise serializers.ValidationError({"qr_token": "Invalid or inactive QR."})
+
+        office = qr.office
+        lat = attrs["lat"]
+        lng = attrs["lng"]
+
+        # Geo-fence check
+        dist_m = haversine_m(lat, lng, office.latitude, office.longitude)
+        if dist_m > office.allowed_radius_m:
+            raise serializers.ValidationError({
+                "detail": f"Outside allowed location radius. Distance={int(dist_m)}m, Allowed={office.allowed_radius_m}m"
+            })
+
+        attrs["office"] = office
+        attrs["distance_m"] = dist_m
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        user = self.context["request"].user
+        office = validated_data["office"]
+        action = validated_data["action"]
+        lat = validated_data["lat"]
+        lng = validated_data["lng"]
+        accuracy_m = validated_data.get("accuracy_m", None)
+
+        today = localdate()  # Asia/Kolkata settings ke hisaab se
+
+        attendance = Attendance.objects.select_for_update().filter(user=user, date=today).first()
+
+        now = timezone.now()
+
+        if action == "CHECKIN":
+            if attendance and attendance.check_in_time:
+                return {"status": "ALREADY_CHECKED_IN", "attendance_id": attendance.id}
+
+            if not attendance:
+                attendance = Attendance.objects.create(
+                    user=user,
+                    office=office,
+                    date=today,
+                    check_in_time=now,
+                    check_in_lat=lat,
+                    check_in_lng=lng,
+                    check_in_accuracy_m=accuracy_m,
+                    source=Attendance.SOURCE_ONLINE,
+                )
+            else:
+                # attendance exists but no checkin yet
+                attendance.office = office
+                attendance.check_in_time = now
+                attendance.check_in_lat = lat
+                attendance.check_in_lng = lng
+                attendance.check_in_accuracy_m = accuracy_m
+                attendance.save()
+
+            return {"status": "CHECKED_IN", "attendance_id": attendance.id}
+
+        # CHECKOUT
+        if not attendance or not attendance.check_in_time:
+            raise serializers.ValidationError({"detail": "You must CHECKIN first."})
+
+        if attendance.check_out_time:
+            return {"status": "ALREADY_CHECKED_OUT", "attendance_id": attendance.id}
+
+        attendance.check_out_time = now
+        attendance.check_out_lat = lat
+        attendance.check_out_lng = lng
+        attendance.check_out_accuracy_m = accuracy_m
+        attendance.save()
+
+        return {"status": "CHECKED_OUT", "attendance_id": attendance.id}
+
+
+class AttendanceListSerializer(serializers.ModelSerializer):
+    office_name = serializers.CharField(source="office.name", read_only=True)
+
+    class Meta:
+        model = Attendance
+        fields = [
+            "id",
+            "date",
+            "office_name",
+            "check_in_time",
+            "check_out_time",
+            "check_in_lat",
+            "check_in_lng",
+            "check_out_lat",
+            "check_out_lng",
+            "source",
+        ]
+
+from rest_framework import serializers
+from .models import OfficeLocation, OfficeQR
+
+class OfficeLocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OfficeLocation
+        fields = ["id", "name", "address", "latitude", "longitude", "allowed_radius_m", "is_active", "created_at"]
+
+class OfficeQRSerializer(serializers.ModelSerializer):
+    office_name = serializers.CharField(source="office.name", read_only=True)
+
+    class Meta:
+        model = OfficeQR
+        fields = ["id", "office", "office_name", "qr_token", "is_active", "created_at"]
