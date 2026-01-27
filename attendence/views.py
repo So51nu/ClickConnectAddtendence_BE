@@ -218,3 +218,320 @@ class AdminGetOfficeQRView(APIView):
         if not qr:
             return Response({"detail": "QR not generated yet"}, status=404)
         return Response(OfficeQRSerializer(qr).data, status=200)
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from django.utils.timezone import localdate
+
+from .models import (
+    LeaveRequest, RegularizationRequest, ResignationRequest,
+    EmployeeDocument, ESICProfile, OfflineAttendanceRequest,
+    RosterShift, RosterAssignment, OfficeLocation
+)
+from .serializers import (
+    LeaveRequestSerializer, AdminLeaveDecisionSerializer,
+    RegularizationRequestSerializer, AdminRegularizationDecisionSerializer,
+    ResignationRequestSerializer, AdminResignationDecisionSerializer,
+    EmployeeDocumentSerializer, ESICProfileSerializer,
+    OfflineAttendanceRequestSerializer, AdminOfflineDecisionSerializer,
+    RosterShiftSerializer, RosterAssignmentSerializer
+)
+
+# ---------------------------
+# Leaves
+# ---------------------------
+class MyLeaveListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = LeaveRequest.objects.filter(user=request.user).order_by("-created_at")[:100]
+        return Response(LeaveRequestSerializer(qs, many=True).data)
+
+    def post(self, request):
+        ser = LeaveRequestSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        obj = ser.save()
+        return Response(LeaveRequestSerializer(obj).data, status=201)
+
+
+class AdminLeaveListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        status_q = request.query_params.get("status")  # optional
+        qs = LeaveRequest.objects.all().order_by("-created_at")
+        if status_q:
+            qs = qs.filter(status=status_q)
+        return Response(LeaveRequestSerializer(qs, many=True).data)
+
+
+class AdminLeaveDecideView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, leave_id: int):
+        obj = LeaveRequest.objects.filter(id=leave_id).first()
+        if not obj:
+            return Response({"detail": "Not found"}, status=404)
+        ser = AdminLeaveDecisionSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        ser.update(obj, ser.validated_data)
+        return Response(LeaveRequestSerializer(obj).data, status=200)
+
+
+# ---------------------------
+# Regularization
+# ---------------------------
+class MyRegularizationListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = RegularizationRequest.objects.filter(user=request.user).order_by("-created_at")[:100]
+        return Response(RegularizationRequestSerializer(qs, many=True).data)
+
+    def post(self, request):
+        ser = RegularizationRequestSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        obj = ser.save()
+        return Response(RegularizationRequestSerializer(obj).data, status=201)
+
+
+class AdminRegularizationListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        status_q = request.query_params.get("status")
+        qs = RegularizationRequest.objects.all().order_by("-created_at")
+        if status_q:
+            qs = qs.filter(status=status_q)
+        return Response(RegularizationRequestSerializer(qs, many=True).data)
+
+
+class AdminRegularizationDecideView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, req_id: int):
+        obj = RegularizationRequest.objects.filter(id=req_id).first()
+        if not obj:
+            return Response({"detail": "Not found"}, status=404)
+        ser = AdminRegularizationDecisionSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        ser.update(obj, ser.validated_data)
+        return Response(RegularizationRequestSerializer(obj).data, status=200)
+
+
+# ---------------------------
+# Resignation
+# ---------------------------
+class MyResignationListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = ResignationRequest.objects.filter(user=request.user).order_by("-created_at")[:100]
+        return Response(ResignationRequestSerializer(qs, many=True).data)
+
+    def post(self, request):
+        ser = ResignationRequestSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        obj = ser.save()
+        return Response(ResignationRequestSerializer(obj).data, status=201)
+
+
+class AdminResignationListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        status_q = request.query_params.get("status")
+        qs = ResignationRequest.objects.all().order_by("-created_at")
+        if status_q:
+            qs = qs.filter(status=status_q)
+        return Response(ResignationRequestSerializer(qs, many=True).data)
+
+
+class AdminResignationDecideView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, req_id: int):
+        obj = ResignationRequest.objects.filter(id=req_id).first()
+        if not obj:
+            return Response({"detail": "Not found"}, status=404)
+        ser = AdminResignationDecisionSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        ser.update(obj, ser.validated_data)
+        return Response(ResignationRequestSerializer(obj).data, status=200)
+
+
+# ---------------------------
+# Documents
+# ---------------------------
+class MyDocumentListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = EmployeeDocument.objects.filter(user=request.user).order_by("-uploaded_at")[:200]
+        return Response(EmployeeDocumentSerializer(qs, many=True, context={"request": request}).data)
+
+    def post(self, request):
+        # multipart/form-data expected
+        ser = EmployeeDocumentSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        obj = ser.save()
+        return Response(EmployeeDocumentSerializer(obj, context={"request": request}).data, status=201)
+
+
+class MyDocumentDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, doc_id: int):
+        obj = EmployeeDocument.objects.filter(id=doc_id, user=request.user).first()
+        if not obj:
+            return Response({"detail": "Not found"}, status=404)
+        obj.file.delete(save=False)
+        obj.delete()
+        return Response({"detail": "Deleted"}, status=200)
+
+
+# ---------------------------
+# ESIC
+# ---------------------------
+class MyESICView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        obj, _ = ESICProfile.objects.get_or_create(user=request.user)
+        return Response(ESICProfileSerializer(obj).data, status=200)
+
+    def patch(self, request):
+        obj, _ = ESICProfile.objects.get_or_create(user=request.user)
+        ser = ESICProfileSerializer(obj, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ESICProfileSerializer(obj).data, status=200)
+
+
+# ---------------------------
+# Offline Attendance Request
+# ---------------------------
+class MyOfflineAttendanceListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = OfflineAttendanceRequest.objects.filter(user=request.user).select_related("office").order_by("-created_at")[:100]
+        return Response(OfflineAttendanceRequestSerializer(qs, many=True).data)
+
+    def post(self, request):
+        ser = OfflineAttendanceRequestSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        obj = ser.save()
+        return Response(OfflineAttendanceRequestSerializer(obj).data, status=201)
+
+
+class AdminOfflineAttendanceListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        status_q = request.query_params.get("status")
+        qs = OfflineAttendanceRequest.objects.select_related("office", "user").order_by("-created_at")
+        if status_q:
+            qs = qs.filter(status=status_q)
+        return Response(OfflineAttendanceRequestSerializer(qs, many=True).data)
+
+
+class AdminOfflineAttendanceDecideView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, req_id: int):
+        obj = OfflineAttendanceRequest.objects.filter(id=req_id).first()
+        if not obj:
+            return Response({"detail": "Not found"}, status=404)
+        ser = AdminOfflineDecisionSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        ser.update(obj, ser.validated_data)
+        return Response(OfflineAttendanceRequestSerializer(obj).data, status=200)
+
+
+# ---------------------------
+# Roster
+# ---------------------------
+class MyRosterView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # /api/roster/me/?from=YYYY-MM-DD&to=YYYY-MM-DD
+        qs = RosterAssignment.objects.filter(user=request.user).select_related("shift", "office").order_by("-date")
+
+        from_date = request.query_params.get("from")
+        to_date = request.query_params.get("to")
+        if from_date:
+            qs = qs.filter(date__gte=from_date)
+        if to_date:
+            qs = qs.filter(date__lte=to_date)
+
+        if not from_date and not to_date:
+            qs = qs[:30]
+
+        return Response(RosterAssignmentSerializer(qs, many=True).data, status=200)
+
+
+class AdminShiftListCreateView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        qs = RosterShift.objects.all().order_by("name")
+        return Response(RosterShiftSerializer(qs, many=True).data)
+
+    def post(self, request):
+        ser = RosterShiftSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        obj = ser.save()
+        return Response(RosterShiftSerializer(obj).data, status=201)
+
+
+class AdminRosterAssignView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        """
+        Body:
+        {
+          "user": 12,
+          "office": 1,
+          "date": "2026-01-26",
+          "shift": 2,
+          "note": "optional"
+        }
+        """
+        ser = RosterAssignmentSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+
+        data = ser.validated_data
+        obj, _ = RosterAssignment.objects.update_or_create(
+            user=data["user"],
+            date=data["date"],
+            defaults={
+                "office": data["office"],
+                "shift": data["shift"],
+                "note": data.get("note", ""),
+            }
+        )
+        return Response(RosterAssignmentSerializer(obj).data, status=200)
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAdminUser
+
+from .models import User
+from .serializers import AdminUserListSerializer
+
+class AdminUserListView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        q = request.query_params.get("q", "").strip()
+        qs = User.objects.all().order_by("-id")
+
+        if q:
+            qs = qs.filter(email__icontains=q) | qs.filter(full_name__icontains=q)
+
+        return Response(AdminUserListSerializer(qs, many=True).data)

@@ -176,3 +176,208 @@ class Attendance(models.Model):
 
     def __str__(self):
         return f"Attendance({self.user.email}, {self.date}, {self.office.name})"
+
+
+from django.db import models
+from django.conf import settings
+from django.utils import timezone
+
+class LeaveRequest(models.Model):
+    STATUS_PENDING = "PENDING"
+    STATUS_APPROVED = "APPROVED"
+    STATUS_REJECTED = "REJECTED"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="leave_requests")
+    from_date = models.DateField()
+    to_date = models.DateField()
+    leave_type = models.CharField(max_length=30, default="CASUAL")  # CASUAL/SICK/etc
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+
+    admin_comment = models.TextField(blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="leave_decisions"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["user", "status", "created_at"])]
+
+    def __str__(self):
+        return f"Leave({self.user.email}, {self.from_date} - {self.to_date}, {self.status})"
+
+
+class RegularizationRequest(models.Model):
+    STATUS_PENDING = "PENDING"
+    STATUS_APPROVED = "APPROVED"
+    STATUS_REJECTED = "REJECTED"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="regularizations")
+    date = models.DateField()
+    requested_check_in = models.DateTimeField(null=True, blank=True)
+    requested_check_out = models.DateTimeField(null=True, blank=True)
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+
+    admin_comment = models.TextField(blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="regularization_decisions"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["user", "date", "status"])]
+
+    def __str__(self):
+        return f"Regularization({self.user.email}, {self.date}, {self.status})"
+
+
+class ResignationRequest(models.Model):
+    STATUS_PENDING = "PENDING"
+    STATUS_APPROVED = "APPROVED"
+    STATUS_REJECTED = "REJECTED"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="resignations")
+    last_working_date = models.DateField()
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+
+    admin_comment = models.TextField(blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="resignation_decisions"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["user", "status", "created_at"])]
+
+    def __str__(self):
+        return f"Resignation({self.user.email}, {self.last_working_date}, {self.status})"
+
+
+class EmployeeDocument(models.Model):
+    DOC_AADHAR = "AADHAR"
+    DOC_PAN = "PAN"
+    DOC_ESIC = "ESIC"
+    DOC_OTHER = "OTHER"
+    DOC_TYPE_CHOICES = [
+        (DOC_AADHAR, "Aadhar"),
+        (DOC_PAN, "PAN"),
+        (DOC_ESIC, "ESIC"),
+        (DOC_OTHER, "Other"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="documents")
+    doc_type = models.CharField(max_length=20, choices=DOC_TYPE_CHOICES, default=DOC_OTHER)
+    title = models.CharField(max_length=120, blank=True, default="")
+    file = models.FileField(upload_to="employee_docs/")
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["user", "doc_type", "uploaded_at"])]
+
+    def __str__(self):
+        return f"Doc({self.user.email}, {self.doc_type})"
+
+
+class ESICProfile(models.Model):
+    """
+    ESIC details for employee (admin/user can update)
+    """
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="esic")
+    esic_number = models.CharField(max_length=40, blank=True, default="")
+    dispensary = models.CharField(max_length=120, blank=True, default="")
+    branch_office = models.CharField(max_length=120, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"ESIC({self.user.email})"
+
+
+class OfflineAttendanceRequest(models.Model):
+    STATUS_PENDING = "PENDING"
+    STATUS_APPROVED = "APPROVED"
+    STATUS_REJECTED = "REJECTED"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="offline_attendance_requests")
+    office = models.ForeignKey("OfficeLocation", on_delete=models.PROTECT, related_name="offline_requests")
+
+    date = models.DateField()
+    check_in_time = models.DateTimeField(null=True, blank=True)
+    check_out_time = models.DateTimeField(null=True, blank=True)
+
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+
+    admin_comment = models.TextField(blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="offline_decisions"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["user", "date", "status"])]
+
+    def __str__(self):
+        return f"OfflineReq({self.user.email}, {self.date}, {self.status})"
+
+
+class RosterShift(models.Model):
+    """
+    Admin-defined shifts
+    """
+    name = models.CharField(max_length=60)  # e.g. Morning
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.start_time}-{self.end_time})"
+
+
+class RosterAssignment(models.Model):
+    """
+    Assign shift to a user on a date
+    """
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="roster_assignments")
+    office = models.ForeignKey("OfficeLocation", on_delete=models.PROTECT, related_name="roster_assignments")
+    date = models.DateField(db_index=True)
+    shift = models.ForeignKey(RosterShift, on_delete=models.PROTECT, related_name="assignments")
+    note = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("user", "date")
+        indexes = [models.Index(fields=["office", "date"])]
+
+    def __str__(self):
+        return f"Roster({self.user.email}, {self.date}, {self.shift.name})"
