@@ -58,7 +58,7 @@ from .views import (
     MyDocumentListCreateView, MyDocumentDeleteView,
     MyESICView,
     MyOfflineAttendanceListCreateView, AdminOfflineAttendanceListView, AdminOfflineAttendanceDecideView,
-    MyRosterView, AdminShiftListCreateView, AdminRosterAssignView, AdminUserListView,
+    MyRosterView, AdminShiftListCreateView, AdminRosterAssignView, AdminUserListView, AdminAttendanceReportView, AdminAttendanceExportView,
 )
 
 urlpatterns = [
@@ -80,7 +80,8 @@ urlpatterns = [
     path("admin/offices/<int:office_id>/", AdminOfficeUpdateView.as_view(), name="admin_office_update"),
     path("admin/offices/<int:office_id>/generate-qr/", AdminGenerateOfficeQRView.as_view(), name="admin_generate_office_qr"),
     path("admin/offices/<int:office_id>/qr/", AdminGetOfficeQRView.as_view(), name="admin_get_office_qr"),
-
+    path("admin/attendance/report/", AdminAttendanceReportView.as_view(), name="admin_attendance_report"),
+    path("admin/attendance/export/", AdminAttendanceExportView.as_view(), name="admin_attendance_export"),
     # ✅ Leaves
     path("leave/me/", MyLeaveListCreateView.as_view(), name="leave_me"),
     path("admin/leave/", AdminLeaveListView.as_view(), name="admin_leave_list"),

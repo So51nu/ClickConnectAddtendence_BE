@@ -535,3 +535,348 @@ class AdminUserListView(APIView):
             qs = qs.filter(email__icontains=q) | qs.filter(full_name__icontains=q)
 
         return Response(AdminUserListSerializer(qs, many=True).data)
+
+from datetime import datetime, timedelta, time, date
+from io import BytesIO
+import csv
+
+from django.http import HttpResponse
+from django.utils import timezone
+from django.utils.timezone import localdate, localtime
+from django.db.models import Q
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAdminUser
+
+from .models import Attendance, User, OfficeLocation
+
+# Excel
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+
+# PDF
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+
+
+OFFICE_START = time(10, 0, 0)  # 10:00 AM
+OFFICE_END   = time(19, 0, 0)  # 07:00 PM
+
+
+def _parse_date(s: str) -> date:
+    return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+def _date_range_list(d1: date, d2: date):
+    out = []
+    cur = d1
+    while cur <= d2:
+        out.append(cur)
+        cur += timedelta(days=1)
+    return out
+
+
+def _minutes_late(check_in_dt):
+    if not check_in_dt:
+        return 0
+    t = localtime(check_in_dt).time()
+    if t <= OFFICE_START:
+        return 0
+    delta = datetime.combine(date.today(), t) - datetime.combine(date.today(), OFFICE_START)
+    return int(delta.total_seconds() // 60)
+
+
+def _build_attendance_rows(from_date: date, to_date: date, user_id=None, office_id=None):
+    # users set
+    users_qs = User.objects.all().order_by("id")
+    # Optional: only non-staff employees:
+    users_qs = users_qs.filter(is_staff=False, is_superuser=False)
+
+    if user_id:
+        users_qs = users_qs.filter(id=user_id)
+
+    # attendance filter
+    att_qs = Attendance.objects.select_related("user", "office").filter(date__gte=from_date, date__lte=to_date)
+    if user_id:
+        att_qs = att_qs.filter(user_id=user_id)
+    if office_id:
+        att_qs = att_qs.filter(office_id=office_id)
+
+    # map attendance by (user_id, date)
+    att_map = {}
+    for a in att_qs:
+        att_map[(a.user_id, a.date)] = a
+
+    days = _date_range_list(from_date, to_date)
+    rows = []
+    per_user_summary = {}
+
+    for u in users_qs:
+        present = 0
+        absent = 0
+        late = 0
+
+        for d in days:
+            a = att_map.get((u.id, d))
+            if not a:
+                status = "ABSENT"
+                late_min = 0
+                present_dt = None
+                checkout_dt = None
+                office_name = ""
+                absent += 1
+            else:
+                status = "PRESENT"
+                present_dt = a.check_in_time
+                checkout_dt = a.check_out_time
+                office_name = a.office.name if a.office_id else ""
+                late_min = _minutes_late(a.check_in_time)
+                present += 1
+                if late_min > 0:
+                    late += 1
+
+            rows.append({
+                "date": str(d),
+                "user_id": u.id,
+                "email": u.email,
+                "full_name": u.full_name or "",
+                "office": office_name,
+                "check_in_time": localtime(present_dt).strftime("%H:%M:%S") if present_dt else "",
+                "check_out_time": localtime(checkout_dt).strftime("%H:%M:%S") if checkout_dt else "",
+                "status": status,
+                "late_minutes": late_min,
+            })
+
+        per_user_summary[u.id] = {
+            "user_id": u.id,
+            "email": u.email,
+            "full_name": u.full_name or "",
+            "total_days": len(days),
+            "present_days": present,
+            "absent_days": absent,
+            "late_days": late,
+        }
+
+    summary_list = list(per_user_summary.values())
+    return rows, summary_list
+
+
+class AdminAttendanceReportView(APIView):
+    permission_classes = [IsAdminUser]
+
+    """
+    GET /api/admin/attendance/report/?days=7
+    GET /api/admin/attendance/report/?from=2026-01-01&to=2026-01-31
+    optional: user_id, office_id
+    """
+
+    def get(self, request):
+        days = request.query_params.get("days")
+        from_s = request.query_params.get("from")
+        to_s = request.query_params.get("to")
+        user_id = request.query_params.get("user_id")
+        office_id = request.query_params.get("office_id")
+
+        user_id = int(user_id) if user_id else None
+        office_id = int(office_id) if office_id else None
+
+        if from_s and to_s:
+            from_date = _parse_date(from_s)
+            to_date = _parse_date(to_s)
+        else:
+            d = int(days) if days else 7
+            to_date = localdate()
+            from_date = to_date - timedelta(days=d - 1)
+
+        rows, summary = _build_attendance_rows(from_date, to_date, user_id=user_id, office_id=office_id)
+
+        return Response({
+            "from": str(from_date),
+            "to": str(to_date),
+            "office_start": "10:00:00",
+            "office_end": "19:00:00",
+            "filters": {"user_id": user_id, "office_id": office_id},
+            "summary": summary,
+            "rows": rows,
+        })
+
+
+class AdminAttendanceExportView(APIView):
+    permission_classes = [IsAdminUser]
+
+    """
+    GET /api/admin/attendance/export/?format=xlsx&days=7
+    format: xlsx | pdf | csv
+    optional: user_id, office_id, from, to
+    """
+
+    def get(self, request):
+        fmt = (request.query_params.get("format") or "xlsx").lower()
+        days = request.query_params.get("days")
+        from_s = request.query_params.get("from")
+        to_s = request.query_params.get("to")
+        user_id = request.query_params.get("user_id")
+        office_id = request.query_params.get("office_id")
+
+        user_id = int(user_id) if user_id else None
+        office_id = int(office_id) if office_id else None
+
+        if from_s and to_s:
+            from_date = _parse_date(from_s)
+            to_date = _parse_date(to_s)
+        else:
+            d = int(days) if days else 7
+            to_date = localdate()
+            from_date = to_date - timedelta(days=d - 1)
+
+        rows, summary = _build_attendance_rows(from_date, to_date, user_id=user_id, office_id=office_id)
+
+        filename = f"attendance_{from_date}_to_{to_date}"
+        if user_id:
+            filename += f"_user_{user_id}"
+
+        if fmt == "csv":
+            return self._export_csv(rows, summary, filename)
+
+        if fmt == "xlsx":
+            return self._export_xlsx(rows, summary, filename)
+
+        if fmt == "pdf":
+            return self._export_pdf(rows, summary, filename)
+
+        return Response({"detail": "Invalid format. Use xlsx/pdf/csv."}, status=400)
+
+    def _export_csv(self, rows, summary, filename):
+        resp = HttpResponse(content_type="text/csv")
+        resp["Content-Disposition"] = f'attachment; filename="{filename}.csv"'
+        w = csv.writer(resp)
+
+        w.writerow(["SUMMARY"])
+        w.writerow(["user_id", "email", "name", "total_days", "present_days", "absent_days", "late_days"])
+        for s in summary:
+            w.writerow([s["user_id"], s["email"], s["full_name"], s["total_days"], s["present_days"], s["absent_days"], s["late_days"]])
+
+        w.writerow([])
+        w.writerow(["DETAIL"])
+        w.writerow(["date", "user_id", "email", "name", "office", "check_in", "check_out", "status", "late_minutes"])
+        for r in rows:
+            w.writerow([r["date"], r["user_id"], r["email"], r["full_name"], r["office"], r["check_in_time"], r["check_out_time"], r["status"], r["late_minutes"]])
+
+        return resp
+
+    def _export_xlsx(self, rows, summary, filename):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Attendance"
+
+        bold = Font(bold=True)
+        red_fill = PatternFill("solid", fgColor="FFEEEE")
+        red_font = Font(color="CC0000", bold=True)
+        orange_fill = PatternFill("solid", fgColor="FFF3E0")
+        orange_font = Font(color="E65100", bold=True)
+
+        # SUMMARY
+        ws.append(["SUMMARY"])
+        ws["A1"].font = bold
+        ws.append(["user_id", "email", "name", "total_days", "present_days", "absent_days", "late_days"])
+        for c in range(1, 8):
+            ws.cell(row=2, column=c).font = bold
+
+        for s in summary:
+            ws.append([s["user_id"], s["email"], s["full_name"], s["total_days"], s["present_days"], s["absent_days"], s["late_days"]])
+
+        ws.append([])
+        start_row = ws.max_row + 1
+
+        # DETAIL
+        ws.append(["DETAIL"])
+        ws.cell(row=start_row, column=1).font = bold
+
+        ws.append(["date", "user_id", "email", "name", "office", "check_in", "check_out", "status", "late_minutes"])
+        header_row = ws.max_row
+        for c in range(1, 10):
+            ws.cell(row=header_row, column=c).font = bold
+
+        for r in rows:
+            ws.append([r["date"], r["user_id"], r["email"], r["full_name"], r["office"], r["check_in_time"], r["check_out_time"], r["status"], r["late_minutes"]])
+            rr = ws.max_row
+            if r["status"] == "ABSENT":
+                for c in range(1, 10):
+                    ws.cell(row=rr, column=c).fill = red_fill
+                ws.cell(row=rr, column=8).font = red_font
+            elif r["late_minutes"] and r["late_minutes"] > 0:
+                for c in range(1, 10):
+                    ws.cell(row=rr, column=c).fill = orange_fill
+                ws.cell(row=rr, column=9).font = orange_font
+
+        bio = BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+
+        resp = HttpResponse(
+            bio.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        resp["Content-Disposition"] = f'attachment; filename="{filename}.xlsx"'
+        return resp
+
+    def _export_pdf(self, rows, summary, filename):
+        buff = BytesIO()
+        doc = SimpleDocTemplate(buff, pagesize=landscape(A4))
+        styles = getSampleStyleSheet()
+
+        elems = []
+        elems.append(Paragraph("Attendance Report", styles["Title"]))
+        elems.append(Spacer(1, 8))
+
+        # Summary table
+        elems.append(Paragraph("Summary", styles["Heading2"]))
+        sum_data = [["User", "Email", "Total", "Present", "Absent", "Late"]]
+        for s in summary:
+            sum_data.append([s["full_name"] or str(s["user_id"]), s["email"], s["total_days"], s["present_days"], s["absent_days"], s["late_days"]])
+
+        sum_table = Table(sum_data, repeatRows=1)
+        sum_table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ]))
+        elems.append(sum_table)
+        elems.append(Spacer(1, 12))
+
+        # Detail table
+        elems.append(Paragraph("Detail", styles["Heading2"]))
+        det_data = [["Date", "Name", "Email", "Office", "In", "Out", "Status", "Late(min)"]]
+        for r in rows:
+            det_data.append([r["date"], r["full_name"], r["email"], r["office"], r["check_in_time"], r["check_out_time"], r["status"], str(r["late_minutes"])])
+
+        det_table = Table(det_data, repeatRows=1)
+        ts = TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+        ])
+
+        # Color ABSENT rows
+        for i in range(1, len(det_data)):
+            status_val = det_data[i][6]
+            late_val = int(det_data[i][7]) if det_data[i][7].isdigit() else 0
+            if status_val == "ABSENT":
+                ts.add("TEXTCOLOR", (6,i), (6,i), colors.red)
+                ts.add("BACKGROUND", (0,i), (-1,i), colors.whitesmoke)
+            elif late_val > 0:
+                ts.add("TEXTCOLOR", (7,i), (7,i), colors.orange)
+
+        det_table.setStyle(ts)
+        elems.append(det_table)
+
+        doc.build(elems)
+        pdf = buff.getvalue()
+        buff.close()
+
+        resp = HttpResponse(pdf, content_type="application/pdf")
+        resp["Content-Disposition"] = f'attachment; filename="{filename}.pdf"'
+        return resp
