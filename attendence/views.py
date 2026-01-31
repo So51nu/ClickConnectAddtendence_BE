@@ -523,18 +523,27 @@ from rest_framework.permissions import IsAdminUser
 
 from .models import User
 from .serializers import AdminUserListSerializer
+from django.db.models import Q
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAdminUser
+
+from .models import User
+from .serializers import AdminUserListSerializer
 
 class AdminUserListView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        q = request.query_params.get("q", "").strip()
-        qs = User.objects.all().order_by("-id")
+        q = (request.query_params.get("q") or "").strip()
+
+        qs = User.objects.filter(is_staff=False, is_superuser=False).order_by("-id")
 
         if q:
-            qs = qs.filter(email__icontains=q) | qs.filter(full_name__icontains=q)
+            qs = qs.filter(Q(email__icontains=q) | Q(full_name__icontains=q))
 
         return Response(AdminUserListSerializer(qs, many=True).data)
+
 
 from datetime import datetime, timedelta, time, date
 from io import BytesIO
@@ -587,24 +596,21 @@ def _minutes_late(check_in_dt):
     delta = datetime.combine(date.today(), t) - datetime.combine(date.today(), OFFICE_START)
     return int(delta.total_seconds() // 60)
 
+from django.utils.timezone import localtime
 
-def _build_attendance_rows(from_date: date, to_date: date, user_id=None, office_id=None):
-    # users set
-    users_qs = User.objects.all().order_by("id")
-    # Optional: only non-staff employees:
-    users_qs = users_qs.filter(is_staff=False, is_superuser=False)
+def _build_attendance_rows(from_date: date, to_date: date, user_ids=None, office_id=None):
+    user_ids = user_ids or []
 
-    if user_id:
-        users_qs = users_qs.filter(id=user_id)
+    users_qs = User.objects.filter(is_staff=False, is_superuser=False).order_by("id")
+    if user_ids:
+        users_qs = users_qs.filter(id__in=user_ids)
 
-    # attendance filter
     att_qs = Attendance.objects.select_related("user", "office").filter(date__gte=from_date, date__lte=to_date)
-    if user_id:
-        att_qs = att_qs.filter(user_id=user_id)
+    if user_ids:
+        att_qs = att_qs.filter(user_id__in=user_ids)
     if office_id:
         att_qs = att_qs.filter(office_id=office_id)
 
-    # map attendance by (user_id, date)
     att_map = {}
     for a in att_qs:
         att_map[(a.user_id, a.date)] = a
@@ -612,6 +618,11 @@ def _build_attendance_rows(from_date: date, to_date: date, user_id=None, office_
     days = _date_range_list(from_date, to_date)
     rows = []
     per_user_summary = {}
+
+    def fmt_dt(dt):
+        if not dt:
+            return ""
+        return localtime(dt).strftime("%H:%M:%S")
 
     for u in users_qs:
         present = 0
@@ -623,19 +634,19 @@ def _build_attendance_rows(from_date: date, to_date: date, user_id=None, office_
             if not a:
                 status = "ABSENT"
                 late_min = 0
-                present_dt = None
-                checkout_dt = None
                 office_name = ""
                 absent += 1
+                cin = ""
+                cout = ""
             else:
                 status = "PRESENT"
-                present_dt = a.check_in_time
-                checkout_dt = a.check_out_time
                 office_name = a.office.name if a.office_id else ""
                 late_min = _minutes_late(a.check_in_time)
                 present += 1
                 if late_min > 0:
                     late += 1
+                cin = fmt_dt(a.check_in_time)
+                cout = fmt_dt(a.check_out_time)
 
             rows.append({
                 "date": str(d),
@@ -643,8 +654,8 @@ def _build_attendance_rows(from_date: date, to_date: date, user_id=None, office_
                 "email": u.email,
                 "full_name": u.full_name or "",
                 "office": office_name,
-                "check_in_time": localtime(present_dt).strftime("%H:%M:%S") if present_dt else "",
-                "check_out_time": localtime(checkout_dt).strftime("%H:%M:%S") if checkout_dt else "",
+                "check_in_time": cin,
+                "check_out_time": cout,
                 "status": status,
                 "late_minutes": late_min,
             })
@@ -659,8 +670,8 @@ def _build_attendance_rows(from_date: date, to_date: date, user_id=None, office_
             "late_days": late,
         }
 
-    summary_list = list(per_user_summary.values())
-    return rows, summary_list
+    return rows, list(per_user_summary.values())
+
 
 
 class AdminAttendanceReportView(APIView):
@@ -673,14 +684,21 @@ class AdminAttendanceReportView(APIView):
     """
 
     def get(self, request):
+        fmt = (request.query_params.get("format") or "xlsx").lower()
         days = request.query_params.get("days")
         from_s = request.query_params.get("from")
         to_s = request.query_params.get("to")
         user_id = request.query_params.get("user_id")
+        user_ids = request.query_params.get("user_ids")  # ✅ NEW
         office_id = request.query_params.get("office_id")
 
-        user_id = int(user_id) if user_id else None
-        office_id = int(office_id) if office_id else None
+        office_id = int(office_id) if office_id and office_id.isdigit() else None
+
+        ids = []
+        if user_id and user_id.isdigit():
+            ids = [int(user_id)]
+        elif user_ids:
+            ids = _parse_user_ids(user_ids)
 
         if from_s and to_s:
             from_date = _parse_date(from_s)
@@ -690,16 +708,52 @@ class AdminAttendanceReportView(APIView):
             to_date = localdate()
             from_date = to_date - timedelta(days=d - 1)
 
-        rows, summary = _build_attendance_rows(from_date, to_date, user_id=user_id, office_id=office_id)
+        rows, summary = _build_attendance_rows(from_date, to_date, user_ids=ids, office_id=office_id)
+
+        filename = f"attendance_{from_date}_to_{to_date}"
+        if ids:
+            filename += f"_users_{len(ids)}"
+
+        if fmt == "csv":
+            return self._export_csv(rows, summary, filename)
+        if fmt == "xlsx":
+            return self._export_xlsx(rows, summary, filename)
+        if fmt == "pdf":
+            return self._export_pdf(rows, summary, filename)
+
+        return Response({"detail": "Invalid format. Use xlsx/pdf/csv."}, status=400)
+
+from django.utils.timezone import localdate
+
+class AdminDashboardSummaryView(APIView):
+    permission_classes = [IsAdminUser]
+
+    """
+    GET /api/admin/dashboard/summary/?days=30
+    returns overall + per_user summary for dashboard cards
+    """
+    def get(self, request):
+        days = int(request.query_params.get("days") or 30)
+        to_date = localdate()
+        from_date = to_date - timedelta(days=days - 1)
+
+        rows, per_user = _build_attendance_rows(from_date, to_date, user_ids=None, office_id=None)
+
+        total_present = sum(x["present_days"] for x in per_user)
+        total_absent  = sum(x["absent_days"] for x in per_user)
+        total_late    = sum(x["late_days"] for x in per_user)
 
         return Response({
             "from": str(from_date),
             "to": str(to_date),
-            "office_start": "10:00:00",
-            "office_end": "19:00:00",
-            "filters": {"user_id": user_id, "office_id": office_id},
-            "summary": summary,
-            "rows": rows,
+            "days": days,
+            "overall": {
+                "total_users": len(per_user),
+                "total_present_days": total_present,
+                "total_absent_days": total_absent,
+                "total_late_days": total_late,
+            },
+            "per_user": per_user,  # ✅ yahi tum cards me dikhaoge
         })
 
 
