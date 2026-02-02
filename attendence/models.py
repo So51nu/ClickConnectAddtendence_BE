@@ -32,15 +32,20 @@ class UserManager(BaseUserManager):
 
         return self.create_user(email=email, password=password, **extra_fields)
 
-
 class User(AbstractBaseUser, PermissionsMixin):
     id = models.BigAutoField(primary_key=True)
     email = models.EmailField(unique=True, db_index=True)
     full_name = models.CharField(max_length=120, blank=True)
 
-    # ✅ account flags
-    is_active = models.BooleanField(default=False)   # OTP verify ke baad True
-    is_verified = models.BooleanField(default=False) # OTP verify ke baad True
+    phone = models.CharField(
+        max_length=15,
+        unique=True,
+        blank=True,
+        null=True
+    )
+
+    is_active = models.BooleanField(default=True)   # 👈 IMPORTANT
+    is_verified = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     date_joined = models.DateTimeField(default=timezone.now)
 
@@ -48,6 +53,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     REQUIRED_FIELDS = []
 
     objects = UserManager()
+
 
     def __str__(self):
         return self.email

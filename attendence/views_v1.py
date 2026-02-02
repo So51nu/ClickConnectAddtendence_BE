@@ -545,61 +545,29 @@ class AdminUserListView(APIView):
         return Response(AdminUserListSerializer(qs, many=True).data)
 
 
-
-from django.utils.timezone import localdate
-
-class AdminDashboardSummaryView(APIView):
-    permission_classes = [IsAdminUser]
-
-    """
-    GET /api/admin/dashboard/summary/?days=30
-    returns overall + per_user summary for dashboard cards
-    """
-    def get(self, request):
-        days = int(request.query_params.get("days") or 30)
-        to_date = localdate()
-        from_date = to_date - timedelta(days=days - 1)
-
-        rows, per_user = _build_attendance_rows(from_date, to_date, user_ids=None, office_id=None)
-
-        total_present = sum(x["present_days"] for x in per_user)
-        total_absent  = sum(x["absent_days"] for x in per_user)
-        total_late    = sum(x["late_days"] for x in per_user)
-
-        return Response({
-            "from": str(from_date),
-            "to": str(to_date),
-            "days": days,
-            "overall": {
-                "total_users": len(per_user),
-                "total_present_days": total_present,
-                "total_absent_days": total_absent,
-                "total_late_days": total_late,
-            },
-            "per_user": per_user,  # ✅ yahi tum cards me dikhaoge
-        })
-
 from datetime import datetime, timedelta, time, date
 from io import BytesIO
 import csv
 
 from django.http import HttpResponse
+from django.utils import timezone
 from django.utils.timezone import localdate, localtime
 from django.db.models import Q
-
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAdminUser
 
+from .models import Attendance, User, OfficeLocation
+
+# Excel
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
+# PDF
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
-
-from .models import Attendance, User
 
 
 OFFICE_START = time(10, 0, 0)  # 10:00 AM
@@ -619,16 +587,6 @@ def _date_range_list(d1: date, d2: date):
     return out
 
 
-def _parse_user_ids(s: str):
-    # "1,2, 3" -> [1,2,3]
-    out = []
-    for part in (s or "").split(","):
-        part = part.strip()
-        if part.isdigit():
-            out.append(int(part))
-    return out
-
-
 def _minutes_late(check_in_dt):
     if not check_in_dt:
         return 0
@@ -638,6 +596,7 @@ def _minutes_late(check_in_dt):
     delta = datetime.combine(date.today(), t) - datetime.combine(date.today(), OFFICE_START)
     return int(delta.total_seconds() // 60)
 
+from django.utils.timezone import localtime
 
 def _build_attendance_rows(from_date: date, to_date: date, user_ids=None, office_id=None):
     user_ids = user_ids or []
@@ -646,9 +605,7 @@ def _build_attendance_rows(from_date: date, to_date: date, user_ids=None, office
     if user_ids:
         users_qs = users_qs.filter(id__in=user_ids)
 
-    att_qs = Attendance.objects.select_related("user", "office").filter(
-        date__gte=from_date, date__lte=to_date
-    )
+    att_qs = Attendance.objects.select_related("user", "office").filter(date__gte=from_date, date__lte=to_date)
     if user_ids:
         att_qs = att_qs.filter(user_id__in=user_ids)
     if office_id:
@@ -716,27 +673,26 @@ def _build_attendance_rows(from_date: date, to_date: date, user_ids=None, office
     return rows, list(per_user_summary.values())
 
 
-# ---------------------------
-# REPORT = JSON (for admin screen)
-# ---------------------------
+
 class AdminAttendanceReportView(APIView):
     permission_classes = [IsAdminUser]
 
     """
     GET /api/admin/attendance/report/?days=7
     GET /api/admin/attendance/report/?from=2026-01-01&to=2026-01-31
-    optional: user_id, user_ids=1,2,3, office_id
+    optional: user_id, office_id
     """
 
     def get(self, request):
+        fmt = (request.query_params.get("format") or "xlsx").lower()
         days = request.query_params.get("days")
         from_s = request.query_params.get("from")
         to_s = request.query_params.get("to")
         user_id = request.query_params.get("user_id")
-        user_ids = request.query_params.get("user_ids")
+        user_ids = request.query_params.get("user_ids")  # ✅ NEW
         office_id = request.query_params.get("office_id")
 
-        office_id = int(office_id) if (office_id and office_id.isdigit()) else None
+        office_id = int(office_id) if office_id and office_id.isdigit() else None
 
         ids = []
         if user_id and user_id.isdigit():
@@ -748,69 +704,7 @@ class AdminAttendanceReportView(APIView):
             from_date = _parse_date(from_s)
             to_date = _parse_date(to_s)
         else:
-            d = int(days) if (days and str(days).isdigit()) else 7
-            to_date = localdate()
-            from_date = to_date - timedelta(days=d - 1)
-
-        rows, summary = _build_attendance_rows(from_date, to_date, user_ids=ids, office_id=office_id)
-
-        total_present = sum(x["present_days"] for x in summary)
-        total_absent  = sum(x["absent_days"] for x in summary)
-        total_late    = sum(x["late_days"] for x in summary)
-
-        return Response({
-            "from": str(from_date),
-            "to": str(to_date),
-            "days": (to_date - from_date).days + 1,
-            "filters": {
-                "user_ids": ids,
-                "office_id": office_id,
-            },
-            "overall": {
-                "total_users": len(summary),
-                "total_present_days": total_present,
-                "total_absent_days": total_absent,
-                "total_late_days": total_late,
-            },
-            "summary": summary,  # per user cards/table
-            "rows": rows,        # detail list
-        })
-
-
-# ---------------------------
-# EXPORT = file download (xlsx/pdf/csv)
-# ---------------------------
-class AdminAttendanceExportView(APIView):
-    permission_classes = [IsAdminUser]
-
-    """
-    GET /api/admin/attendance/export/?format=xlsx&days=7
-    format: xlsx | pdf | csv
-    optional: user_id, user_ids, office_id, from, to
-    """
-
-    def get(self, request):
-        fmt = (request.query_params.get("format") or "xlsx").lower()
-        days = request.query_params.get("days")
-        from_s = request.query_params.get("from")
-        to_s = request.query_params.get("to")
-        user_id = request.query_params.get("user_id")
-        user_ids = request.query_params.get("user_ids")
-        office_id = request.query_params.get("office_id")
-
-        office_id = int(office_id) if (office_id and office_id.isdigit()) else None
-
-        ids = []
-        if user_id and str(user_id).isdigit():
-            ids = [int(user_id)]
-        elif user_ids:
-            ids = _parse_user_ids(user_ids)
-
-        if from_s and to_s:
-            from_date = _parse_date(from_s)
-            to_date = _parse_date(to_s)
-        else:
-            d = int(days) if (days and str(days).isdigit()) else 7
+            d = int(days) if days else 7
             to_date = localdate()
             from_date = to_date - timedelta(days=d - 1)
 
@@ -824,6 +718,85 @@ class AdminAttendanceExportView(APIView):
             return self._export_csv(rows, summary, filename)
         if fmt == "xlsx":
             return self._export_xlsx(rows, summary, filename)
+        if fmt == "pdf":
+            return self._export_pdf(rows, summary, filename)
+
+        return Response({"detail": "Invalid format. Use xlsx/pdf/csv."}, status=400)
+
+from django.utils.timezone import localdate
+
+class AdminDashboardSummaryView(APIView):
+    permission_classes = [IsAdminUser]
+
+    """
+    GET /api/admin/dashboard/summary/?days=30
+    returns overall + per_user summary for dashboard cards
+    """
+    def get(self, request):
+        days = int(request.query_params.get("days") or 30)
+        to_date = localdate()
+        from_date = to_date - timedelta(days=days - 1)
+
+        rows, per_user = _build_attendance_rows(from_date, to_date, user_ids=None, office_id=None)
+
+        total_present = sum(x["present_days"] for x in per_user)
+        total_absent  = sum(x["absent_days"] for x in per_user)
+        total_late    = sum(x["late_days"] for x in per_user)
+
+        return Response({
+            "from": str(from_date),
+            "to": str(to_date),
+            "days": days,
+            "overall": {
+                "total_users": len(per_user),
+                "total_present_days": total_present,
+                "total_absent_days": total_absent,
+                "total_late_days": total_late,
+            },
+            "per_user": per_user,  # ✅ yahi tum cards me dikhaoge
+        })
+
+
+class AdminAttendanceExportView(APIView):
+    permission_classes = [IsAdminUser]
+
+    """
+    GET /api/admin/attendance/export/?format=xlsx&days=7
+    format: xlsx | pdf | csv
+    optional: user_id, office_id, from, to
+    """
+
+    def get(self, request):
+        fmt = (request.query_params.get("format") or "xlsx").lower()
+        days = request.query_params.get("days")
+        from_s = request.query_params.get("from")
+        to_s = request.query_params.get("to")
+        user_id = request.query_params.get("user_id")
+        office_id = request.query_params.get("office_id")
+
+        user_id = int(user_id) if user_id else None
+        office_id = int(office_id) if office_id else None
+
+        if from_s and to_s:
+            from_date = _parse_date(from_s)
+            to_date = _parse_date(to_s)
+        else:
+            d = int(days) if days else 7
+            to_date = localdate()
+            from_date = to_date - timedelta(days=d - 1)
+
+        rows, summary = _build_attendance_rows(from_date, to_date, user_id=user_id, office_id=office_id)
+
+        filename = f"attendance_{from_date}_to_{to_date}"
+        if user_id:
+            filename += f"_user_{user_id}"
+
+        if fmt == "csv":
+            return self._export_csv(rows, summary, filename)
+
+        if fmt == "xlsx":
+            return self._export_xlsx(rows, summary, filename)
+
         if fmt == "pdf":
             return self._export_pdf(rows, summary, filename)
 
@@ -941,6 +914,217 @@ class AdminAttendanceExportView(APIView):
             ("FONTSIZE", (0,0), (-1,-1), 8),
         ])
 
+        # Color ABSENT rows
+        for i in range(1, len(det_data)):
+            status_val = det_data[i][6]
+            late_val = int(det_data[i][7]) if det_data[i][7].isdigit() else 0
+            if status_val == "ABSENT":
+                ts.add("TEXTCOLOR", (6,i), (6,i), colors.red)
+                ts.add("BACKGROUND", (0,i), (-1,i), colors.whitesmoke)
+            elif late_val > 0:
+                ts.add("TEXTCOLOR", (7,i), (7,i), colors.orange)
+
+        det_table.setStyle(ts)
+        elems.append(det_table)
+
+        doc.build(elems)
+        pdf = buff.getvalue()
+        buff.close()
+
+        resp = HttpResponse(pdf, content_type="application/pdf")
+        resp["Content-Disposition"] = f'attachment; filename="{filename}.pdf"'
+        return resp
+
+class AdminDashboardSummaryView(APIView):
+    permission_classes = [IsAdminUser]
+
+    """
+    GET /api/admin/dashboard/summary/?days=30
+    returns overall + per_user summary for dashboard cards
+    """
+    def get(self, request):
+        days = int(request.query_params.get("days") or 30)
+        to_date = localdate()
+        from_date = to_date - timedelta(days=days - 1)
+
+        rows, per_user = _build_attendance_rows(from_date, to_date, user_ids=None, office_id=None)
+
+        total_present = sum(x["present_days"] for x in per_user)
+        total_absent  = sum(x["absent_days"] for x in per_user)
+        total_late    = sum(x["late_days"] for x in per_user)
+
+        return Response({
+            "from": str(from_date),
+            "to": str(to_date),
+            "days": days,
+            "overall": {
+                "total_users": len(per_user),
+                "total_present_days": total_present,
+                "total_absent_days": total_absent,
+                "total_late_days": total_late,
+            },
+            "per_user": per_user,  # ✅ yahi tum cards me dikhaoge
+        })
+
+
+class AdminAttendanceExportView(APIView):
+    permission_classes = [IsAdminUser]
+
+    """
+    GET /api/admin/attendance/export/?format=xlsx&days=7
+    format: xlsx | pdf | csv
+    optional: user_id, office_id, from, to
+    """
+
+    def get(self, request):
+        fmt = (request.query_params.get("format") or "xlsx").lower()
+        days = request.query_params.get("days")
+        from_s = request.query_params.get("from")
+        to_s = request.query_params.get("to")
+        user_id = request.query_params.get("user_id")
+        office_id = request.query_params.get("office_id")
+
+        user_id = int(user_id) if user_id else None
+        office_id = int(office_id) if office_id else None
+
+        if from_s and to_s:
+            from_date = _parse_date(from_s)
+            to_date = _parse_date(to_s)
+        else:
+            d = int(days) if days else 7
+            to_date = localdate()
+            from_date = to_date - timedelta(days=d - 1)
+
+        rows, summary = _build_attendance_rows(from_date, to_date, user_id=user_id, office_id=office_id)
+
+        filename = f"attendance_{from_date}_to_{to_date}"
+        if user_id:
+            filename += f"_user_{user_id}"
+
+        if fmt == "csv":
+            return self._export_csv(rows, summary, filename)
+
+        if fmt == "xlsx":
+            return self._export_xlsx(rows, summary, filename)
+
+        if fmt == "pdf":
+            return self._export_pdf(rows, summary, filename)
+
+        return Response({"detail": "Invalid format. Use xlsx/pdf/csv."}, status=400)
+
+    def _export_csv(self, rows, summary, filename):
+        resp = HttpResponse(content_type="text/csv")
+        resp["Content-Disposition"] = f'attachment; filename="{filename}.csv"'
+        w = csv.writer(resp)
+
+        w.writerow(["SUMMARY"])
+        w.writerow(["user_id", "email", "name", "total_days", "present_days", "absent_days", "late_days"])
+        for s in summary:
+            w.writerow([s["user_id"], s["email"], s["full_name"], s["total_days"], s["present_days"], s["absent_days"], s["late_days"]])
+
+        w.writerow([])
+        w.writerow(["DETAIL"])
+        w.writerow(["date", "user_id", "email", "name", "office", "check_in", "check_out", "status", "late_minutes"])
+        for r in rows:
+            w.writerow([r["date"], r["user_id"], r["email"], r["full_name"], r["office"], r["check_in_time"], r["check_out_time"], r["status"], r["late_minutes"]])
+
+        return resp
+
+    def _export_xlsx(self, rows, summary, filename):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Attendance"
+
+        bold = Font(bold=True)
+        red_fill = PatternFill("solid", fgColor="FFEEEE")
+        red_font = Font(color="CC0000", bold=True)
+        orange_fill = PatternFill("solid", fgColor="FFF3E0")
+        orange_font = Font(color="E65100", bold=True)
+
+        # SUMMARY
+        ws.append(["SUMMARY"])
+        ws["A1"].font = bold
+        ws.append(["user_id", "email", "name", "total_days", "present_days", "absent_days", "late_days"])
+        for c in range(1, 8):
+            ws.cell(row=2, column=c).font = bold
+
+        for s in summary:
+            ws.append([s["user_id"], s["email"], s["full_name"], s["total_days"], s["present_days"], s["absent_days"], s["late_days"]])
+
+        ws.append([])
+        start_row = ws.max_row + 1
+
+        # DETAIL
+        ws.append(["DETAIL"])
+        ws.cell(row=start_row, column=1).font = bold
+
+        ws.append(["date", "user_id", "email", "name", "office", "check_in", "check_out", "status", "late_minutes"])
+        header_row = ws.max_row
+        for c in range(1, 10):
+            ws.cell(row=header_row, column=c).font = bold
+
+        for r in rows:
+            ws.append([r["date"], r["user_id"], r["email"], r["full_name"], r["office"], r["check_in_time"], r["check_out_time"], r["status"], r["late_minutes"]])
+            rr = ws.max_row
+            if r["status"] == "ABSENT":
+                for c in range(1, 10):
+                    ws.cell(row=rr, column=c).fill = red_fill
+                ws.cell(row=rr, column=8).font = red_font
+            elif r["late_minutes"] and r["late_minutes"] > 0:
+                for c in range(1, 10):
+                    ws.cell(row=rr, column=c).fill = orange_fill
+                ws.cell(row=rr, column=9).font = orange_font
+
+        bio = BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+
+        resp = HttpResponse(
+            bio.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        resp["Content-Disposition"] = f'attachment; filename="{filename}.xlsx"'
+        return resp
+
+    def _export_pdf(self, rows, summary, filename):
+        buff = BytesIO()
+        doc = SimpleDocTemplate(buff, pagesize=landscape(A4))
+        styles = getSampleStyleSheet()
+
+        elems = []
+        elems.append(Paragraph("Attendance Report", styles["Title"]))
+        elems.append(Spacer(1, 8))
+
+        # Summary table
+        elems.append(Paragraph("Summary", styles["Heading2"]))
+        sum_data = [["User", "Email", "Total", "Present", "Absent", "Late"]]
+        for s in summary:
+            sum_data.append([s["full_name"] or str(s["user_id"]), s["email"], s["total_days"], s["present_days"], s["absent_days"], s["late_days"]])
+
+        sum_table = Table(sum_data, repeatRows=1)
+        sum_table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ]))
+        elems.append(sum_table)
+        elems.append(Spacer(1, 12))
+
+        # Detail table
+        elems.append(Paragraph("Detail", styles["Heading2"]))
+        det_data = [["Date", "Name", "Email", "Office", "In", "Out", "Status", "Late(min)"]]
+        for r in rows:
+            det_data.append([r["date"], r["full_name"], r["email"], r["office"], r["check_in_time"], r["check_out_time"], r["status"], str(r["late_minutes"])])
+
+        det_table = Table(det_data, repeatRows=1)
+        ts = TableStyle([
+            ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+            ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+            ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+            ("FONTSIZE", (0,0), (-1,-1), 8),
+        ])
+
+        # Color ABSENT rows
         for i in range(1, len(det_data)):
             status_val = det_data[i][6]
             late_val = int(det_data[i][7]) if det_data[i][7].isdigit() else 0
