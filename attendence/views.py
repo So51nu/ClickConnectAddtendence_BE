@@ -960,3 +960,301 @@ class AdminAttendanceExportView(APIView):
         resp = HttpResponse(pdf, content_type="application/pdf")
         resp["Content-Disposition"] = f'attachment; filename="{filename}.pdf"'
         return resp
+
+# views.py (add at bottom or in suitable section)
+
+from datetime import datetime, timedelta, date
+from io import BytesIO
+
+from django.http import HttpResponse
+from django.utils.timezone import localdate
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
+
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+
+from .models import DailyReport
+from .serializers import DailyReportSerializer
+
+
+def _parse_date_ymd(s: str) -> date:
+    return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+class MyDailyReportListCreateView(APIView):
+    """
+    Employee:
+    GET  /api/daily-reports/me/?from=YYYY-MM-DD&to=YYYY-MM-DD
+    POST /api/daily-reports/me/  {report_date,title,description,status}
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = DailyReport.objects.filter(user=request.user).order_by("-report_date", "-created_at")
+
+        from_s = request.query_params.get("from")
+        to_s = request.query_params.get("to")
+
+        if from_s:
+            qs = qs.filter(report_date__gte=from_s)
+        if to_s:
+            qs = qs.filter(report_date__lte=to_s)
+
+        if not from_s and not to_s:
+            qs = qs[:60]
+
+        return Response(DailyReportSerializer(qs, many=True).data, status=200)
+
+    def post(self, request):
+        ser = DailyReportSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        obj = ser.save()
+        return Response(DailyReportSerializer(obj).data, status=201)
+
+
+class AdminDailyReportListView(APIView):
+    """
+    Admin:
+    GET /api/admin/daily-reports/?from=YYYY-MM-DD&to=YYYY-MM-DD&user_id=12
+    """
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        qs = DailyReport.objects.select_related("user").all()
+
+        from_s = request.query_params.get("from")
+        to_s = request.query_params.get("to")
+        user_id = request.query_params.get("user_id")
+
+        if from_s:
+            qs = qs.filter(report_date__gte=from_s)
+        if to_s:
+            qs = qs.filter(report_date__lte=to_s)
+        if user_id and str(user_id).isdigit():
+            qs = qs.filter(user_id=int(user_id))
+
+        qs = qs.order_by("report_date", "user__email", "created_at")
+        return Response(DailyReportSerializer(qs, many=True).data, status=200)
+
+
+class AdminDailyReportExportPDFView(APIView):
+    """
+    Admin PDF Export (Date-wise sections):
+    GET /api/admin/daily-reports/export/?from=YYYY-MM-DD&to=YYYY-MM-DD&user_id=12
+    """
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        from_s = request.query_params.get("from")
+        to_s = request.query_params.get("to")
+        user_id = request.query_params.get("user_id")
+
+        # default last 7 days
+        if from_s and to_s:
+            from_date = _parse_date_ymd(from_s)
+            to_date = _parse_date_ymd(to_s)
+        else:
+            to_date = localdate()
+            from_date = to_date - timedelta(days=6)
+
+        qs = DailyReport.objects.select_related("user").filter(
+            report_date__gte=from_date,
+            report_date__lte=to_date
+        )
+
+        if user_id and str(user_id).isdigit():
+            qs = qs.filter(user_id=int(user_id))
+
+        qs = qs.order_by("report_date", "user__email", "created_at")
+
+        # group by report_date
+        grouped = {}
+        for r in qs:
+            grouped.setdefault(r.report_date, []).append(r)
+
+        # build PDF
+        buff = BytesIO()
+        doc = SimpleDocTemplate(buff, pagesize=A4, topMargin=24, bottomMargin=24, leftMargin=24, rightMargin=24)
+        styles = getSampleStyleSheet()
+        elems = []
+
+        title = f"Daily Reports ({from_date} to {to_date})"
+        if user_id and str(user_id).isdigit():
+            title += f" | user_id={user_id}"
+
+        elems.append(Paragraph(title, styles["Title"]))
+        elems.append(Spacer(1, 10))
+
+        if not grouped:
+            elems.append(Paragraph("No reports found in selected date range.", styles["Normal"]))
+            doc.build(elems)
+            pdf = buff.getvalue()
+            buff.close()
+            resp = HttpResponse(pdf, content_type="application/pdf")
+            resp["Content-Disposition"] = f'attachment; filename="daily_reports_{from_date}_to_{to_date}.pdf"'
+            return resp
+
+        # For each date => section + table
+        for i, day in enumerate(sorted(grouped.keys())):
+            elems.append(Paragraph(f"Date: {day}", styles["Heading2"]))
+            elems.append(Spacer(1, 6))
+
+            data = [["Employee", "Email", "Title", "Status", "Description"]]
+            for r in grouped[day]:
+                data.append([
+                    (r.user.full_name or "").strip() or f"User #{r.user_id}",
+                    r.user.email,
+                    r.title,
+                    r.status,
+                    (r.description or "")
+                ])
+
+            table = Table(data, repeatRows=1, colWidths=[90, 120, 120, 60, 150])
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+                ("VALIGN", (0,0), (-1,-1), "TOP"),
+                ("FONTSIZE", (0,0), (-1,-1), 8),
+                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.white]),
+            ]))
+
+            elems.append(table)
+
+            # page break between dates (optional but clean)
+            if i != len(grouped.keys()) - 1:
+                elems.append(PageBreak())
+
+        doc.build(elems)
+        pdf = buff.getvalue()
+        buff.close()
+
+        resp = HttpResponse(pdf, content_type="application/pdf")
+        resp["Content-Disposition"] = f'attachment; filename="daily_reports_{from_date}_to_{to_date}.pdf"'
+        return resp
+
+# views.py (add this class)
+
+from rest_framework.permissions import IsAuthenticated
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from io import BytesIO
+from datetime import timedelta
+from django.http import HttpResponse
+from django.utils.timezone import localdate
+
+from .models import DailyReport
+
+class MyDailyReportExportPDFView(APIView):
+    """
+    Employee PDF Export (date-wise sections):
+    GET /api/daily-reports/me/export/?from=YYYY-MM-DD&to=YYYY-MM-DD
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from_s = request.query_params.get("from")
+        to_s = request.query_params.get("to")
+
+        # default last 7 days
+        if from_s and to_s:
+            from_date = _parse_date_ymd(from_s)
+            to_date = _parse_date_ymd(to_s)
+        else:
+            to_date = localdate()
+            from_date = to_date - timedelta(days=6)
+
+        qs = DailyReport.objects.filter(
+            user=request.user,
+            report_date__gte=from_date,
+            report_date__lte=to_date
+        ).order_by("report_date", "created_at")
+
+        grouped = {}
+        for r in qs:
+            grouped.setdefault(r.report_date, []).append(r)
+
+        buff = BytesIO()
+        doc = SimpleDocTemplate(buff, pagesize=A4, topMargin=24, bottomMargin=24, leftMargin=24, rightMargin=24)
+        styles = getSampleStyleSheet()
+        elems = []
+
+        elems.append(Paragraph(f"My Daily Reports ({from_date} to {to_date})", styles["Title"]))
+        elems.append(Spacer(1, 10))
+
+        if not grouped:
+            elems.append(Paragraph("No reports found in selected date range.", styles["Normal"]))
+            doc.build(elems)
+            pdf = buff.getvalue()
+            buff.close()
+            resp = HttpResponse(pdf, content_type="application/pdf")
+            resp["Content-Disposition"] = f'attachment; filename="my_daily_reports_{from_date}_to_{to_date}.pdf"'
+            return resp
+
+        for i, day in enumerate(sorted(grouped.keys())):
+            elems.append(Paragraph(f"Date: {day}", styles["Heading2"]))
+            elems.append(Spacer(1, 6))
+
+            data = [["Title", "Status", "Description"]]
+            for r in grouped[day]:
+                data.append([r.title, r.status, r.description or ""])
+
+            table = Table(data, repeatRows=1, colWidths=[170, 70, 250])
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+                ("VALIGN", (0,0), (-1,-1), "TOP"),
+                ("FONTSIZE", (0,0), (-1,-1), 9),
+                ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.white]),
+            ]))
+            elems.append(table)
+
+            if i != len(grouped.keys()) - 1:
+                elems.append(PageBreak())
+
+        doc.build(elems)
+        pdf = buff.getvalue()
+        buff.close()
+
+        resp = HttpResponse(pdf, content_type="application/pdf")
+        resp["Content-Disposition"] = f'attachment; filename="my_daily_reports_{from_date}_to_{to_date}.pdf"'
+        return resp
+
+# views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
+
+from .models import DailyReport
+from .serializers import DailyReportSerializer
+
+class MyDailyReportUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, report_id: int):
+        obj = DailyReport.objects.filter(id=report_id, user=request.user).first()
+        if not obj:
+            return Response({"detail": "Not found"}, status=404)
+
+        # only allow updating status/title/description if you want
+        allowed = {}
+        if "status" in request.data:
+            allowed["status"] = request.data.get("status")
+        if "title" in request.data:
+            allowed["title"] = request.data.get("title")
+        if "description" in request.data:
+            allowed["description"] = request.data.get("description")
+
+        ser = DailyReportSerializer(obj, data=allowed, partial=True, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(ser.data, status=200)

@@ -59,7 +59,9 @@ from .views import (
     MyESICView,
     MyOfflineAttendanceListCreateView, AdminOfflineAttendanceListView, AdminOfflineAttendanceDecideView,
     MyRosterView, AdminShiftListCreateView, AdminRosterAssignView, AdminUserListView, AdminAttendanceReportView, AdminAttendanceExportView,
-    AdminDashboardSummaryView,
+    AdminDashboardSummaryView,MyDailyReportListCreateView,
+    AdminDailyReportListView,
+    AdminDailyReportExportPDFView,MyDailyReportExportPDFView,MyDailyReportUpdateView,
 
 )
 
@@ -94,11 +96,16 @@ urlpatterns = [
     path("regularization/me/", MyRegularizationListCreateView.as_view(), name="regularization_me"),
     path("admin/regularization/", AdminRegularizationListView.as_view(), name="admin_regularization_list"),
     path("admin/regularization/<int:req_id>/decide/", AdminRegularizationDecideView.as_view(), name="admin_regularization_decide"),
-
+    path("daily-reports/me/", MyDailyReportListCreateView.as_view(), name="daily_reports_me"),
+    path("daily-reports/me/export/", MyDailyReportExportPDFView.as_view(), name="my_daily_reports_export"),
+    # ✅ Daily Reports (Admin)
+    path("admin/daily-reports/", AdminDailyReportListView.as_view(), name="admin_daily_reports"),
+    path("admin/daily-reports/export/", AdminDailyReportExportPDFView.as_view(), name="admin_daily_reports_export"),
     # ✅ Resignation
     path("resignation/me/", MyResignationListCreateView.as_view(), name="resignation_me"),
     path("admin/resignation/", AdminResignationListView.as_view(), name="admin_resignation_list"),
     path("admin/resignation/<int:req_id>/decide/", AdminResignationDecideView.as_view(), name="admin_resignation_decide"),
+    path("daily-reports/me/<int:report_id>/", MyDailyReportUpdateView.as_view(), name="daily_reports_me_update"),
 
     # ✅ Documents
     path("documents/me/", MyDocumentListCreateView.as_view(), name="documents_me"),
@@ -117,3 +124,4 @@ urlpatterns = [
     path("admin/roster/shifts/", AdminShiftListCreateView.as_view(), name="admin_roster_shifts"),
     path("admin/roster/assign/", AdminRosterAssignView.as_view(), name="admin_roster_assign"),
 ]
+

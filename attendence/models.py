@@ -387,3 +387,38 @@ class RosterAssignment(models.Model):
 
     def __str__(self):
         return f"Roster({self.user.email}, {self.date}, {self.shift.name})"
+
+
+# models.py (add at bottom)
+
+from django.db import models
+from django.conf import settings
+
+class DailyReport(models.Model):
+    STATUS_DONE = "DONE"
+    STATUS_PROGRESS = "PROGRESS"
+    STATUS_PENDING = "PENDING"
+    STATUS_CHOICES = [
+        (STATUS_DONE, "Done"),
+        (STATUS_PROGRESS, "In Progress"),
+        (STATUS_PENDING, "Pending"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="daily_reports")
+    report_date = models.DateField(db_index=True)  # ✅ jis date ka report hai
+    title = models.CharField(max_length=180)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["report_date", "status"]),
+            models.Index(fields=["user", "report_date"]),
+        ]
+        ordering = ["-report_date", "-created_at"]
+
+    def __str__(self):
+        return f"DailyReport({self.user.email}, {self.report_date}, {self.status})"

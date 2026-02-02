@@ -599,3 +599,30 @@ class AdminUserListSerializer(serializers.ModelSerializer):
 
     def get_designation(self, obj):
         return getattr(getattr(obj, "profile", None), "designation", "")
+
+
+# serializers.py (add at bottom)
+
+from rest_framework import serializers
+from .models import DailyReport
+
+class DailyReportSerializer(serializers.ModelSerializer):
+    user_email = serializers.CharField(source="user.email", read_only=True)
+    user_name = serializers.CharField(source="user.full_name", read_only=True)
+
+    class Meta:
+        model = DailyReport
+        fields = [
+            "id",
+            "user", "user_email", "user_name",
+            "report_date",
+            "title",
+            "description",
+            "status",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "user", "user_email", "user_name", "created_at", "updated_at"]
+
+    def create(self, validated_data):
+        return DailyReport.objects.create(user=self.context["request"].user, **validated_data)
