@@ -1,19 +1,89 @@
+# attendence/views.py
+
+import secrets
+import csv
+import math
+from io import BytesIO
+from datetime import datetime, timedelta, time, date
+
+from django.http import HttpResponse
+from django.utils.timezone import localdate, localtime
+
+from django.db.models import Q
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
 
 from .serializers import (
     RegisterSerializer,
     VerifyOtpSerializer,
     ResendOtpSerializer,
     MeSerializer,
+
+    AttendanceMarkSerializer,
+    AttendanceListSerializer,
+
+    OfficeLocationSerializer,
+    OfficeQRSerializer,
+
+    LeaveRequestSerializer,
+    AdminLeaveDecisionSerializer,
+    RegularizationRequestSerializer,
+    AdminRegularizationDecisionSerializer,
+    ResignationRequestSerializer,
+    AdminResignationDecisionSerializer,
+
+    EmployeeDocumentSerializer,
+    ESICProfileSerializer,
+
+    OfflineAttendanceRequestSerializer,
+    AdminOfflineDecisionSerializer,
+
+    RosterShiftSerializer,
+    RosterAssignmentSerializer,
+
+    AdminUserListSerializer,
+
+    DailyReportSerializer,
 )
-from .models import User
+
+from .models import (
+    User,
+    Attendance,
+    OfficeLocation,
+    OfficeQR,
+
+    LeaveRequest,
+    RegularizationRequest,
+    ResignationRequest,
+
+    EmployeeDocument,
+    ESICProfile,
+    OfflineAttendanceRequest,
+
+    RosterShift,
+    RosterAssignment,
+
+    DailyReport,
+)
 
 
+# ============================================================
+# AUTH VIEWS
+# ============================================================
 class RegisterView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -54,6 +124,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token = super().get_token(user)
         token["email"] = user.email
         token["full_name"] = user.full_name or ""
+        token["is_staff"] = bool(getattr(user, "is_staff", False))
+        token["is_superuser"] = bool(getattr(user, "is_superuser", False))
         return token
 
     def validate(self, attrs):
@@ -61,7 +133,6 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         user = self.user
 
         if not user.is_verified:
-            # verified nahi hai to login deny
             raise permissions.PermissionDenied("Email not verified. Please verify OTP first.")
 
         if not user.is_active:
@@ -76,31 +147,16 @@ class LoginView(TokenObtainPairView):
 
 
 class MeView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         return Response(MeSerializer(request.user).data, status=status.HTTP_200_OK)
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from django.utils.timezone import localdate
-from datetime import datetime
 
-from .serializers import AttendanceMarkSerializer, AttendanceListSerializer
-from .models import Attendance
-
-
+# ============================================================
+# ATTENDANCE VIEWS
+# ============================================================
 class AttendanceMarkView(APIView):
-    """
-    POST /api/attendance/mark/
-    Body:
-    {
-      "action": "CHECKIN" or "CHECKOUT",
-      "qr_token": "scanned-token",
-      "lat": 28.61,
-      "lng": 77.20,
-      "accuracy_m": 15
-    }
-    """
     def post(self, request):
         ser = AttendanceMarkSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
@@ -109,10 +165,6 @@ class AttendanceMarkView(APIView):
 
 
 class MyAttendanceListView(APIView):
-    """
-    GET /api/attendance/me/?from=2026-01-01&to=2026-01-31
-    If no dates: last 30 records default
-    """
     def get(self, request):
         qs = Attendance.objects.filter(user=request.user).select_related("office").order_by("-date")
 
@@ -124,7 +176,6 @@ class MyAttendanceListView(APIView):
         if to_date:
             qs = qs.filter(date__lte=to_date)
 
-        # default limit
         if not from_date and not to_date:
             qs = qs[:30]
 
@@ -133,9 +184,6 @@ class MyAttendanceListView(APIView):
 
 
 class TodayAttendanceStatusView(APIView):
-    """
-    GET /api/attendance/today/
-    """
     def get(self, request):
         today = localdate()
         att = Attendance.objects.filter(user=request.user, date=today).select_related("office").first()
@@ -144,23 +192,17 @@ class TodayAttendanceStatusView(APIView):
 
         return Response({
             "date": str(today),
-            "office": att.office.name,
+            "office": att.office.name if att.office_id else "",
             "checked_in": bool(att.check_in_time),
             "checked_out": bool(att.check_out_time),
             "check_in_time": att.check_in_time,
             "check_out_time": att.check_out_time,
         }, status=status.HTTP_200_OK)
 
-import secrets
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAdminUser
 
-from .models import OfficeLocation, OfficeQR
-from .serializers import OfficeLocationSerializer, OfficeQRSerializer
-
-
+# ============================================================
+# ADMIN OFFICE (OFFICE + QR)
+# ============================================================
 class AdminOfficeListCreateView(APIView):
     permission_classes = [IsAdminUser]
 
@@ -197,7 +239,7 @@ class AdminGenerateOfficeQRView(APIView):
         if not office:
             return Response({"detail": "Office not found or inactive"}, status=404)
 
-        token = secrets.token_urlsafe(24)  # ✅ strong unique token
+        token = secrets.token_urlsafe(24)
         qr, created = OfficeQR.objects.get_or_create(
             office=office,
             defaults={"qr_token": token, "is_active": True},
@@ -219,29 +261,10 @@ class AdminGetOfficeQRView(APIView):
             return Response({"detail": "QR not generated yet"}, status=404)
         return Response(OfficeQRSerializer(qr).data, status=200)
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
-from django.utils.timezone import localdate
 
-from .models import (
-    LeaveRequest, RegularizationRequest, ResignationRequest,
-    EmployeeDocument, ESICProfile, OfflineAttendanceRequest,
-    RosterShift, RosterAssignment, OfficeLocation
-)
-from .serializers import (
-    LeaveRequestSerializer, AdminLeaveDecisionSerializer,
-    RegularizationRequestSerializer, AdminRegularizationDecisionSerializer,
-    ResignationRequestSerializer, AdminResignationDecisionSerializer,
-    EmployeeDocumentSerializer, ESICProfileSerializer,
-    OfflineAttendanceRequestSerializer, AdminOfflineDecisionSerializer,
-    RosterShiftSerializer, RosterAssignmentSerializer
-)
-
-# ---------------------------
-# Leaves
-# ---------------------------
+# ============================================================
+# LEAVES
+# ============================================================
 class MyLeaveListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -260,7 +283,7 @@ class AdminLeaveListView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        status_q = request.query_params.get("status")  # optional
+        status_q = request.query_params.get("status")
         qs = LeaveRequest.objects.all().order_by("-created_at")
         if status_q:
             qs = qs.filter(status=status_q)
@@ -280,9 +303,9 @@ class AdminLeaveDecideView(APIView):
         return Response(LeaveRequestSerializer(obj).data, status=200)
 
 
-# ---------------------------
-# Regularization
-# ---------------------------
+# ============================================================
+# REGULARIZATION
+# ============================================================
 class MyRegularizationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -321,9 +344,9 @@ class AdminRegularizationDecideView(APIView):
         return Response(RegularizationRequestSerializer(obj).data, status=200)
 
 
-# ---------------------------
-# Resignation
-# ---------------------------
+# ============================================================
+# RESIGNATION
+# ============================================================
 class MyResignationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -362,9 +385,9 @@ class AdminResignationDecideView(APIView):
         return Response(ResignationRequestSerializer(obj).data, status=200)
 
 
-# ---------------------------
-# Documents
-# ---------------------------
+# ============================================================
+# DOCUMENTS
+# ============================================================
 class MyDocumentListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -373,7 +396,6 @@ class MyDocumentListCreateView(APIView):
         return Response(EmployeeDocumentSerializer(qs, many=True, context={"request": request}).data)
 
     def post(self, request):
-        # multipart/form-data expected
         ser = EmployeeDocumentSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         obj = ser.save()
@@ -392,9 +414,9 @@ class MyDocumentDeleteView(APIView):
         return Response({"detail": "Deleted"}, status=200)
 
 
-# ---------------------------
+# ============================================================
 # ESIC
-# ---------------------------
+# ============================================================
 class MyESICView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -410,9 +432,9 @@ class MyESICView(APIView):
         return Response(ESICProfileSerializer(obj).data, status=200)
 
 
-# ---------------------------
-# Offline Attendance Request
-# ---------------------------
+# ============================================================
+# OFFLINE ATTENDANCE REQUEST
+# ============================================================
 class MyOfflineAttendanceListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -451,14 +473,13 @@ class AdminOfflineAttendanceDecideView(APIView):
         return Response(OfflineAttendanceRequestSerializer(obj).data, status=200)
 
 
-# ---------------------------
-# Roster
-# ---------------------------
+# ============================================================
+# ROSTER
+# ============================================================
 class MyRosterView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # /api/roster/me/?from=YYYY-MM-DD&to=YYYY-MM-DD
         qs = RosterAssignment.objects.filter(user=request.user).select_related("shift", "office").order_by("-date")
 
         from_date = request.query_params.get("from")
@@ -492,16 +513,6 @@ class AdminRosterAssignView(APIView):
     permission_classes = [IsAdminUser]
 
     def post(self, request):
-        """
-        Body:
-        {
-          "user": 12,
-          "office": 1,
-          "date": "2026-01-26",
-          "shift": 2,
-          "note": "optional"
-        }
-        """
         ser = RosterAssignmentSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
 
@@ -517,98 +528,29 @@ class AdminRosterAssignView(APIView):
         )
         return Response(RosterAssignmentSerializer(obj).data, status=200)
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAdminUser
 
-from .models import User
-from .serializers import AdminUserListSerializer
-from django.db.models import Q
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAdminUser
-
-from .models import User
-from .serializers import AdminUserListSerializer
-
+# ============================================================
+# ADMIN USERS LIST
+# ============================================================
 class AdminUserListView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request):
         q = (request.query_params.get("q") or "").strip()
-
         qs = User.objects.filter(is_staff=False, is_superuser=False).order_by("-id")
-
         if q:
             qs = qs.filter(Q(email__icontains=q) | Q(full_name__icontains=q))
-
         return Response(AdminUserListSerializer(qs, many=True).data)
 
 
-
-from django.utils.timezone import localdate
-
-class AdminDashboardSummaryView(APIView):
-    permission_classes = [IsAdminUser]
-
-    """
-    GET /api/admin/dashboard/summary/?days=30
-    returns overall + per_user summary for dashboard cards
-    """
-    def get(self, request):
-        days = int(request.query_params.get("days") or 30)
-        to_date = localdate()
-        from_date = to_date - timedelta(days=days - 1)
-
-        rows, per_user = _build_attendance_rows(from_date, to_date, user_ids=None, office_id=None)
-
-        total_present = sum(x["present_days"] for x in per_user)
-        total_absent  = sum(x["absent_days"] for x in per_user)
-        total_late    = sum(x["late_days"] for x in per_user)
-
-        return Response({
-            "from": str(from_date),
-            "to": str(to_date),
-            "days": days,
-            "overall": {
-                "total_users": len(per_user),
-                "total_present_days": total_present,
-                "total_absent_days": total_absent,
-                "total_late_days": total_late,
-            },
-            "per_user": per_user,  # ✅ yahi tum cards me dikhaoge
-        })
-
-from datetime import datetime, timedelta, time, date
-from io import BytesIO
-import csv
-
-from django.http import HttpResponse
-from django.utils.timezone import localdate, localtime
-from django.db.models import Q
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAdminUser
-
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
-
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-
-from .models import Attendance, User
-
-
-OFFICE_START = time(10, 0, 0)  # 10:00 AM
-OFFICE_END   = time(19, 0, 0)  # 07:00 PM
-
+# ============================================================
+# ADMIN DASHBOARD / REPORT / EXPORT (your code intact)
+# ============================================================
+OFFICE_START = time(10, 0, 0)
+OFFICE_END   = time(19, 0, 0)
 
 def _parse_date(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
-
 
 def _date_range_list(d1: date, d2: date):
     out = []
@@ -618,16 +560,13 @@ def _date_range_list(d1: date, d2: date):
         cur += timedelta(days=1)
     return out
 
-
 def _parse_user_ids(s: str):
-    # "1,2, 3" -> [1,2,3]
     out = []
     for part in (s or "").split(","):
         part = part.strip()
         if part.isdigit():
             out.append(int(part))
     return out
-
 
 def _minutes_late(check_in_dt):
     if not check_in_dt:
@@ -637,7 +576,6 @@ def _minutes_late(check_in_dt):
         return 0
     delta = datetime.combine(date.today(), t) - datetime.combine(date.today(), OFFICE_START)
     return int(delta.total_seconds() // 60)
-
 
 def _build_attendance_rows(from_date: date, to_date: date, user_ids=None, office_id=None):
     user_ids = user_ids or []
@@ -716,17 +654,36 @@ def _build_attendance_rows(from_date: date, to_date: date, user_ids=None, office
     return rows, list(per_user_summary.values())
 
 
-# ---------------------------
-# REPORT = JSON (for admin screen)
-# ---------------------------
-class AdminAttendanceReportView(APIView):
+class AdminDashboardSummaryView(APIView):
     permission_classes = [IsAdminUser]
 
-    """
-    GET /api/admin/attendance/report/?days=7
-    GET /api/admin/attendance/report/?from=2026-01-01&to=2026-01-31
-    optional: user_id, user_ids=1,2,3, office_id
-    """
+    def get(self, request):
+        days = int(request.query_params.get("days") or 30)
+        to_date = localdate()
+        from_date = to_date - timedelta(days=days - 1)
+
+        rows, per_user = _build_attendance_rows(from_date, to_date, user_ids=None, office_id=None)
+
+        total_present = sum(x["present_days"] for x in per_user)
+        total_absent  = sum(x["absent_days"] for x in per_user)
+        total_late    = sum(x["late_days"] for x in per_user)
+
+        return Response({
+            "from": str(from_date),
+            "to": str(to_date),
+            "days": days,
+            "overall": {
+                "total_users": len(per_user),
+                "total_present_days": total_present,
+                "total_absent_days": total_absent,
+                "total_late_days": total_late,
+            },
+            "per_user": per_user,
+        })
+
+
+class AdminAttendanceReportView(APIView):
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         days = request.query_params.get("days")
@@ -762,32 +719,20 @@ class AdminAttendanceReportView(APIView):
             "from": str(from_date),
             "to": str(to_date),
             "days": (to_date - from_date).days + 1,
-            "filters": {
-                "user_ids": ids,
-                "office_id": office_id,
-            },
+            "filters": {"user_ids": ids, "office_id": office_id},
             "overall": {
                 "total_users": len(summary),
                 "total_present_days": total_present,
                 "total_absent_days": total_absent,
                 "total_late_days": total_late,
             },
-            "summary": summary,  # per user cards/table
-            "rows": rows,        # detail list
+            "summary": summary,
+            "rows": rows,
         })
 
 
-# ---------------------------
-# EXPORT = file download (xlsx/pdf/csv)
-# ---------------------------
 class AdminAttendanceExportView(APIView):
     permission_classes = [IsAdminUser]
-
-    """
-    GET /api/admin/attendance/export/?format=xlsx&days=7
-    format: xlsx | pdf | csv
-    optional: user_id, user_ids, office_id, from, to
-    """
 
     def get(self, request):
         fmt = (request.query_params.get("format") or "xlsx").lower()
@@ -858,7 +803,6 @@ class AdminAttendanceExportView(APIView):
         orange_fill = PatternFill("solid", fgColor="FFF3E0")
         orange_font = Font(color="E65100", bold=True)
 
-        # SUMMARY
         ws.append(["SUMMARY"])
         ws["A1"].font = bold
         ws.append(["user_id", "email", "name", "total_days", "present_days", "absent_days", "late_days"])
@@ -871,7 +815,6 @@ class AdminAttendanceExportView(APIView):
         ws.append([])
         start_row = ws.max_row + 1
 
-        # DETAIL
         ws.append(["DETAIL"])
         ws.cell(row=start_row, column=1).font = bold
 
@@ -912,7 +855,6 @@ class AdminAttendanceExportView(APIView):
         elems.append(Paragraph("Attendance Report", styles["Title"]))
         elems.append(Spacer(1, 8))
 
-        # Summary table
         elems.append(Paragraph("Summary", styles["Heading2"]))
         sum_data = [["User", "Email", "Total", "Present", "Absent", "Late"]]
         for s in summary:
@@ -927,7 +869,6 @@ class AdminAttendanceExportView(APIView):
         elems.append(sum_table)
         elems.append(Spacer(1, 12))
 
-        # Detail table
         elems.append(Paragraph("Detail", styles["Heading2"]))
         det_data = [["Date", "Name", "Email", "Office", "In", "Out", "Status", "Late(min)"]]
         for r in rows:
@@ -961,37 +902,15 @@ class AdminAttendanceExportView(APIView):
         resp["Content-Disposition"] = f'attachment; filename="{filename}.pdf"'
         return resp
 
-# views.py (add at bottom or in suitable section)
 
-from datetime import datetime, timedelta, date
-from io import BytesIO
-
-from django.http import HttpResponse
-from django.utils.timezone import localdate
-
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAdminUser
-
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-
-from .models import DailyReport
-from .serializers import DailyReportSerializer
-
-
+# ============================================================
+# DAILY REPORTS
+# ============================================================
 def _parse_date_ymd(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
 
 class MyDailyReportListCreateView(APIView):
-    """
-    Employee:
-    GET  /api/daily-reports/me/?from=YYYY-MM-DD&to=YYYY-MM-DD
-    POST /api/daily-reports/me/  {report_date,title,description,status}
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -1018,10 +937,6 @@ class MyDailyReportListCreateView(APIView):
 
 
 class AdminDailyReportListView(APIView):
-    """
-    Admin:
-    GET /api/admin/daily-reports/?from=YYYY-MM-DD&to=YYYY-MM-DD&user_id=12
-    """
     permission_classes = [IsAdminUser]
 
     def get(self, request):
@@ -1043,10 +958,6 @@ class AdminDailyReportListView(APIView):
 
 
 class AdminDailyReportExportPDFView(APIView):
-    """
-    Admin PDF Export (Date-wise sections):
-    GET /api/admin/daily-reports/export/?from=YYYY-MM-DD&to=YYYY-MM-DD&user_id=12
-    """
     permission_classes = [IsAdminUser]
 
     def get(self, request):
@@ -1054,7 +965,6 @@ class AdminDailyReportExportPDFView(APIView):
         to_s = request.query_params.get("to")
         user_id = request.query_params.get("user_id")
 
-        # default last 7 days
         if from_s and to_s:
             from_date = _parse_date_ymd(from_s)
             to_date = _parse_date_ymd(to_s)
@@ -1072,12 +982,10 @@ class AdminDailyReportExportPDFView(APIView):
 
         qs = qs.order_by("report_date", "user__email", "created_at")
 
-        # group by report_date
         grouped = {}
         for r in qs:
             grouped.setdefault(r.report_date, []).append(r)
 
-        # build PDF
         buff = BytesIO()
         doc = SimpleDocTemplate(buff, pagesize=A4, topMargin=24, bottomMargin=24, leftMargin=24, rightMargin=24)
         styles = getSampleStyleSheet()
@@ -1099,7 +1007,6 @@ class AdminDailyReportExportPDFView(APIView):
             resp["Content-Disposition"] = f'attachment; filename="daily_reports_{from_date}_to_{to_date}.pdf"'
             return resp
 
-        # For each date => section + table
         for i, day in enumerate(sorted(grouped.keys())):
             elems.append(Paragraph(f"Date: {day}", styles["Heading2"]))
             elems.append(Spacer(1, 6))
@@ -1125,8 +1032,6 @@ class AdminDailyReportExportPDFView(APIView):
             ]))
 
             elems.append(table)
-
-            # page break between dates (optional but clean)
             if i != len(grouped.keys()) - 1:
                 elems.append(PageBreak())
 
@@ -1138,32 +1043,14 @@ class AdminDailyReportExportPDFView(APIView):
         resp["Content-Disposition"] = f'attachment; filename="daily_reports_{from_date}_to_{to_date}.pdf"'
         return resp
 
-# views.py (add this class)
-
-from rest_framework.permissions import IsAuthenticated
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-from io import BytesIO
-from datetime import timedelta
-from django.http import HttpResponse
-from django.utils.timezone import localdate
-
-from .models import DailyReport
 
 class MyDailyReportExportPDFView(APIView):
-    """
-    Employee PDF Export (date-wise sections):
-    GET /api/daily-reports/me/export/?from=YYYY-MM-DD&to=YYYY-MM-DD
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from_s = request.query_params.get("from")
         to_s = request.query_params.get("to")
 
-        # default last 7 days
         if from_s and to_s:
             from_date = _parse_date_ymd(from_s)
             to_date = _parse_date_ymd(to_s)
@@ -1228,14 +1115,6 @@ class MyDailyReportExportPDFView(APIView):
         resp["Content-Disposition"] = f'attachment; filename="my_daily_reports_{from_date}_to_{to_date}.pdf"'
         return resp
 
-# views.py
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework import status
-
-from .models import DailyReport
-from .serializers import DailyReportSerializer
 
 class MyDailyReportUpdateView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1245,7 +1124,6 @@ class MyDailyReportUpdateView(APIView):
         if not obj:
             return Response({"detail": "Not found"}, status=404)
 
-        # only allow updating status/title/description if you want
         allowed = {}
         if "status" in request.data:
             allowed["status"] = request.data.get("status")

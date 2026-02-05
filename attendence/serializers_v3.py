@@ -1,25 +1,93 @@
-from rest_framework import serializers
-from django.utils import timezone
-from django.conf import settings
-from django.core.mail import send_mail
-from django.db import transaction
+# attendence/serializers.py
+
 import hashlib
 import secrets
+import math
 from datetime import timedelta
 
-from .models import User, EmployeeProfile, EmailOTP
+from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
+from django.db import transaction
+from django.utils import timezone
+from django.utils.timezone import localdate
+from rest_framework import serializers
+
+from .models import (
+    User,
+    EmployeeProfile,
+    EmailOTP,
+
+    OfficeLocation,
+    OfficeQR,
+    Attendance,
+
+    LeaveRequest,
+    RegularizationRequest,
+    ResignationRequest,
+
+    EmployeeDocument,
+    ESICProfile,
+    OfflineAttendanceRequest,
+
+    RosterShift,
+    RosterAssignment,
+
+    DailyReport,
+)
 
 
+# ============================================================
+# OTP HELPERS + SAFE EMAIL SEND (FIXED)
+# ============================================================
 def _hash_otp(otp: str, salt: str) -> str:
     return hashlib.sha256(f"{otp}:{salt}".encode("utf-8")).hexdigest()
 
 
 def _generate_otp() -> str:
-    # 6-digit OTP
     return f"{secrets.randbelow(10**6):06d}"
 
 
+def _safe_last_sent_at(obj):
+    """
+    Some projects have EmailOTP.last_sent_at, some don't.
+    If missing/None, fallback to created_at.
+    """
+    v = getattr(obj, "last_sent_at", None)
+    if v:
+        return v
+    return getattr(obj, "created_at", None)
+
+
+def send_otp_email(to_email: str, subject: str, message: str):
+    """
+    Robust SMTP send:
+    - Explicit open()
+    - Clean ValidationError (no raw 500 SMTPServerDisconnected)
+    """
+    try:
+        conn = get_connection(fail_silently=False)
+        opened = conn.open()
+        if not opened:
+            raise serializers.ValidationError({"detail": "SMTP connection could not be opened."})
+
+        try:
+            EmailMessage(
+                subject=subject,
+                body=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[to_email],
+                connection=conn,
+            ).send(fail_silently=False)
+        finally:
+            conn.close()
+
+    except Exception as e:
+        raise serializers.ValidationError({"detail": f"Failed to send OTP email. SMTP error: {str(e)}"})
+
+
+# ============================================================
+# AUTH SERIALIZERS
+# ============================================================
 class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(min_length=8, write_only=True)
@@ -33,24 +101,30 @@ class RegisterSerializer(serializers.Serializer):
     def create(self, validated_data):
         email = validated_data["email"]
         password = validated_data["password"]
-        full_name = validated_data.get("full_name", "")
-        phone = validated_data.get("phone", "")
+        full_name = (validated_data.get("full_name") or "").strip()
+        phone = (validated_data.get("phone") or "").strip()
 
-        # If user exists and already verified => block
         existing = User.objects.filter(email=email).first()
         if existing and existing.is_verified:
             raise serializers.ValidationError({"email": "User already exists and verified. Please login."})
 
+        # Re-register not verified user
         if existing and not existing.is_verified:
-            # re-register: update password/name
             user = existing
-            user.full_name = full_name or user.full_name
+            if full_name:
+                user.full_name = full_name
             user.set_password(password)
             user.is_active = False
             user.is_verified = False
             user.save()
         else:
-            user = User.objects.create_user(email=email, password=password, full_name=full_name, is_active=False, is_verified=False)
+            user = User.objects.create_user(
+                email=email,
+                password=password,
+                full_name=full_name,
+                is_active=False,
+                is_verified=False,
+            )
 
         # Ensure profile exists
         EmployeeProfile.objects.get_or_create(user=user, defaults={"phone": phone})
@@ -59,24 +133,28 @@ class RegisterSerializer(serializers.Serializer):
             profile.phone = phone
             profile.save()
 
-        # OTP throttle: max send per hour + cooldown
+        # OTP throttle: cooldown + per hour limit
         now = timezone.now()
         one_hour_ago = now - timedelta(hours=1)
-        last_otp = EmailOTP.objects.filter(email=email, purpose=EmailOTP.PURPOSE_REGISTER_VERIFY).order_by("-created_at").first()
+
+        last_otp = EmailOTP.objects.filter(
+            email=email,
+            purpose=EmailOTP.PURPOSE_REGISTER_VERIFY
+        ).order_by("-created_at").first()
 
         if last_otp:
-            # cooldown check
-            cooldown = getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60)
-            if (now - last_otp.last_sent_at).total_seconds() < cooldown:
-                raise serializers.ValidationError({"detail": f"Please wait {cooldown} seconds before requesting OTP again."})
+            cooldown = int(getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60) or 60)
+            last_sent = _safe_last_sent_at(last_otp)
+            if last_sent and (now - last_sent).total_seconds() < cooldown:
+                wait = cooldown - int((now - last_sent).total_seconds())
+                raise serializers.ValidationError({"detail": f"Please wait {max(wait,1)} seconds before requesting OTP again."})
 
-            # hourly send limit (rough)
             hourly_count = EmailOTP.objects.filter(
                 email=email,
                 purpose=EmailOTP.PURPOSE_REGISTER_VERIFY,
-                created_at__gte=one_hour_ago
+                created_at__gte=one_hour_ago,
             ).count()
-            max_per_hour = getattr(settings, "OTP_MAX_SEND_PER_HOUR", 5)
+            max_per_hour = int(getattr(settings, "OTP_MAX_SEND_PER_HOUR", 5) or 5)
             if hourly_count >= max_per_hour:
                 raise serializers.ValidationError({"detail": "OTP limit reached. Try again later."})
 
@@ -84,35 +162,32 @@ class RegisterSerializer(serializers.Serializer):
         salt = secrets.token_hex(8)
         otp_hash = _hash_otp(otp, salt)
 
-        expires_min = getattr(settings, "OTP_EXPIRY_MINUTES", 10)
+        expires_min = int(getattr(settings, "OTP_EXPIRY_MINUTES", 10) or 10)
         expires_at = now + timedelta(minutes=expires_min)
 
-        EmailOTP.objects.create(
+        otp_obj = EmailOTP.objects.create(
             email=email,
             purpose=EmailOTP.PURPOSE_REGISTER_VERIFY,
             otp_hash=otp_hash,
             salt=salt,
             expires_at=expires_at,
-            is_used=False
+            is_used=False,
         )
 
-        # Send email
+        # if model has last_sent_at, save it
+        if hasattr(otp_obj, "last_sent_at"):
+            otp_obj.last_sent_at = now
+            otp_obj.save(update_fields=["last_sent_at"])
+
         subject = "Your Attendance App OTP"
         message = (
             f"Your OTP is: {otp}\n\n"
             f"This OTP will expire in {expires_min} minutes.\n"
             f"If you did not request this, please ignore this email."
         )
-        from_email = settings.DEFAULT_FROM_EMAIL or settings.EMAIL_HOST_USER
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
 
-
+        # ✅ Send after DB commit (CRITICAL FIX)
+        transaction.on_commit(lambda: send_otp_email(email, subject, message))
 
         return user
 
@@ -134,7 +209,6 @@ class VerifyOtpSerializer(serializers.Serializer):
             raise serializers.ValidationError({"email": "User not found. Please register first."})
 
         if user.is_verified:
-            # already verified
             return attrs
 
         otp_obj = EmailOTP.objects.filter(
@@ -152,13 +226,12 @@ class VerifyOtpSerializer(serializers.Serializer):
         if _hash_otp(otp, otp_obj.salt) != otp_obj.otp_hash:
             raise serializers.ValidationError({"otp": "Invalid OTP."})
 
-        # Mark verified
         user.is_verified = True
         user.is_active = True
-        user.save()
+        user.save(update_fields=["is_verified", "is_active"])
 
         otp_obj.is_used = True
-        otp_obj.save()
+        otp_obj.save(update_fields=["is_used"])
 
         return attrs
 
@@ -183,19 +256,24 @@ class ResendOtpSerializer(serializers.Serializer):
         now = timezone.now()
         one_hour_ago = now - timedelta(hours=1)
 
-        # cooldown + per hour limit
-        last_otp = EmailOTP.objects.filter(email=email, purpose=EmailOTP.PURPOSE_REGISTER_VERIFY).order_by("-created_at").first()
+        last_otp = EmailOTP.objects.filter(
+            email=email,
+            purpose=EmailOTP.PURPOSE_REGISTER_VERIFY
+        ).order_by("-created_at").first()
+
         if last_otp:
-            cooldown = getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60)
-            if (now - last_otp.last_sent_at).total_seconds() < cooldown:
-                raise serializers.ValidationError({"detail": f"Please wait {cooldown} seconds before requesting OTP again."})
+            cooldown = int(getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60) or 60)
+            last_sent = _safe_last_sent_at(last_otp)
+            if last_sent and (now - last_sent).total_seconds() < cooldown:
+                wait = cooldown - int((now - last_sent).total_seconds())
+                raise serializers.ValidationError({"detail": f"Please wait {max(wait,1)} seconds before requesting OTP again."})
 
         hourly_count = EmailOTP.objects.filter(
             email=email,
             purpose=EmailOTP.PURPOSE_REGISTER_VERIFY,
             created_at__gte=one_hour_ago
         ).count()
-        max_per_hour = getattr(settings, "OTP_MAX_SEND_PER_HOUR", 5)
+        max_per_hour = int(getattr(settings, "OTP_MAX_SEND_PER_HOUR", 5) or 5)
         if hourly_count >= max_per_hour:
             raise serializers.ValidationError({"detail": "OTP limit reached. Try again later."})
 
@@ -203,10 +281,10 @@ class ResendOtpSerializer(serializers.Serializer):
         salt = secrets.token_hex(8)
         otp_hash = _hash_otp(otp, salt)
 
-        expires_min = getattr(settings, "OTP_EXPIRY_MINUTES", 10)
+        expires_min = int(getattr(settings, "OTP_EXPIRY_MINUTES", 10) or 10)
         expires_at = now + timedelta(minutes=expires_min)
 
-        EmailOTP.objects.create(
+        otp_obj = EmailOTP.objects.create(
             email=email,
             purpose=EmailOTP.PURPOSE_REGISTER_VERIFY,
             otp_hash=otp_hash,
@@ -215,22 +293,19 @@ class ResendOtpSerializer(serializers.Serializer):
             is_used=False
         )
 
+        if hasattr(otp_obj, "last_sent_at"):
+            otp_obj.last_sent_at = now
+            otp_obj.save(update_fields=["last_sent_at"])
+
         subject = "Your Attendance App OTP (Resend)"
         message = (
             f"Your OTP is: {otp}\n\n"
             f"This OTP will expire in {expires_min} minutes.\n"
             f"If you did not request this, please ignore this email."
         )
-        from_email = settings.DEFAULT_FROM_EMAIL or settings.EMAIL_HOST_USER
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
 
-
+        # ✅ Send after commit
+        transaction.on_commit(lambda: send_otp_email(email, subject, message))
 
         return attrs
 
@@ -243,7 +318,11 @@ class MeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "email", "full_name", "is_verified", "is_active", "phone", "employee_code", "department", "designation","is_staff","is_superuser"]
+        fields = [
+            "id", "email", "full_name", "is_verified", "is_active",
+            "phone", "employee_code", "department", "designation",
+            "is_staff", "is_superuser"
+        ]
 
     def get_phone(self, obj):
         return getattr(getattr(obj, "profile", None), "phone", "")
@@ -257,20 +336,12 @@ class MeSerializer(serializers.ModelSerializer):
     def get_designation(self, obj):
         return getattr(getattr(obj, "profile", None), "designation", "")
 
-from rest_framework import serializers
-from django.utils import timezone
-from django.db import transaction
-from django.utils.timezone import localdate
-import math
 
-from .models import OfficeQR, Attendance
-
-
+# ============================================================
+# ATTENDANCE SERIALIZERS
+# ============================================================
 def haversine_m(lat1, lon1, lat2, lon2) -> float:
-    """
-    Returns distance in meters between two lat/lng points.
-    """
-    R = 6371000.0  # meters
+    R = 6371000.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -282,14 +353,8 @@ def haversine_m(lat1, lon1, lat2, lon2) -> float:
 
 
 class AttendanceMarkSerializer(serializers.Serializer):
-    """
-    action: CHECKIN or CHECKOUT
-    qr_token: scanned from QR (static)
-    lat/lng/accuracy: from device
-    """
     action = serializers.ChoiceField(choices=["CHECKIN", "CHECKOUT"])
     qr_token = serializers.CharField(max_length=80)
-
     lat = serializers.FloatField()
     lng = serializers.FloatField()
     accuracy_m = serializers.FloatField(required=False)
@@ -303,16 +368,14 @@ class AttendanceMarkSerializer(serializers.Serializer):
             raise serializers.ValidationError({"detail": "Account inactive."})
 
         qr_token = attrs["qr_token"].strip()
-        qr = OfficeQR.objects.select_related("office").filter(qr_token=qr_token, is_active=True, office__is_active=True).first()
+        qr = OfficeQR.objects.select_related("office").filter(
+            qr_token=qr_token, is_active=True, office__is_active=True
+        ).first()
         if not qr:
             raise serializers.ValidationError({"qr_token": "Invalid or inactive QR."})
 
         office = qr.office
-        lat = attrs["lat"]
-        lng = attrs["lng"]
-
-        # Geo-fence check
-        dist_m = haversine_m(lat, lng, office.latitude, office.longitude)
+        dist_m = haversine_m(attrs["lat"], attrs["lng"], office.latitude, office.longitude)
         if dist_m > office.allowed_radius_m:
             raise serializers.ValidationError({
                 "detail": f"Outside allowed location radius. Distance={int(dist_m)}m, Allowed={office.allowed_radius_m}m"
@@ -331,10 +394,8 @@ class AttendanceMarkSerializer(serializers.Serializer):
         lng = validated_data["lng"]
         accuracy_m = validated_data.get("accuracy_m", None)
 
-        today = localdate()  # Asia/Kolkata settings ke hisaab se
-
+        today = localdate()
         attendance = Attendance.objects.select_for_update().filter(user=user, date=today).first()
-
         now = timezone.now()
 
         if action == "CHECKIN":
@@ -353,7 +414,6 @@ class AttendanceMarkSerializer(serializers.Serializer):
                     source=Attendance.SOURCE_ONLINE,
                 )
             else:
-                # attendance exists but no checkin yet
                 attendance.office = office
                 attendance.check_in_time = now
                 attendance.check_in_lat = lat
@@ -385,25 +445,19 @@ class AttendanceListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Attendance
         fields = [
-            "id",
-            "date",
-            "office_name",
-            "check_in_time",
-            "check_out_time",
-            "check_in_lat",
-            "check_in_lng",
-            "check_out_lat",
-            "check_out_lng",
+            "id", "date", "office_name",
+            "check_in_time", "check_out_time",
+            "check_in_lat", "check_in_lng",
+            "check_out_lat", "check_out_lng",
             "source",
         ]
 
-from rest_framework import serializers
-from .models import OfficeLocation, OfficeQR
 
 class OfficeLocationSerializer(serializers.ModelSerializer):
     class Meta:
         model = OfficeLocation
         fields = ["id", "name", "address", "latitude", "longitude", "allowed_radius_m", "is_active", "created_at"]
+
 
 class OfficeQRSerializer(serializers.ModelSerializer):
     office_name = serializers.CharField(source="office.name", read_only=True)
@@ -413,22 +467,13 @@ class OfficeQRSerializer(serializers.ModelSerializer):
         fields = ["id", "office", "office_name", "qr_token", "is_active", "created_at"]
 
 
-
-
-
-from rest_framework import serializers
-from django.utils import timezone
-from django.utils.timezone import localdate
-
-from .models import (
-    LeaveRequest, RegularizationRequest, ResignationRequest,
-    EmployeeDocument, ESICProfile, OfflineAttendanceRequest,
-    RosterShift, RosterAssignment, OfficeLocation, Attendance
-)
-
+# ============================================================
+# LEAVE / REGULARIZATION / RESIGNATION
+# ============================================================
 class LeaveRequestSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(source="user.email", read_only=True)
     user_name = serializers.CharField(source="user.full_name", read_only=True)
+
     class Meta:
         model = LeaveRequest
         fields = "__all__"
@@ -459,6 +504,7 @@ class AdminLeaveDecisionSerializer(serializers.Serializer):
 class RegularizationRequestSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(source="user.email", read_only=True)
     user_name = serializers.CharField(source="user.full_name", read_only=True)
+
     class Meta:
         model = RegularizationRequest
         fields = "__all__"
@@ -484,6 +530,7 @@ class AdminRegularizationDecisionSerializer(serializers.Serializer):
 class ResignationRequestSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(source="user.email", read_only=True)
     user_name = serializers.CharField(source="user.full_name", read_only=True)
+
     class Meta:
         model = ResignationRequest
         fields = "__all__"
@@ -506,6 +553,9 @@ class AdminResignationDecisionSerializer(serializers.Serializer):
         return instance
 
 
+# ============================================================
+# DOCUMENTS / ESIC
+# ============================================================
 class EmployeeDocumentSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
 
@@ -531,9 +581,11 @@ class ESICProfileSerializer(serializers.ModelSerializer):
         read_only_fields = ["updated_at"]
 
 
+# ============================================================
+# OFFLINE ATTENDANCE REQUEST
+# ============================================================
 class OfflineAttendanceRequestSerializer(serializers.ModelSerializer):
     office_name = serializers.CharField(source="office.name", read_only=True)
-    
     user_email = serializers.CharField(source="user.email", read_only=True)
     user_name = serializers.CharField(source="user.full_name", read_only=True)
 
@@ -559,9 +611,13 @@ class AdminOfflineDecisionSerializer(serializers.Serializer):
         instance.decided_at = timezone.now()
         instance.save()
 
-        # If approved => create/update Attendance (official)
+        # If approved => create/update Attendance
         if instance.status == OfflineAttendanceRequest.STATUS_APPROVED:
-            att, _ = Attendance.objects.get_or_create(user=instance.user, date=instance.date, defaults={"office": instance.office})
+            att, _ = Attendance.objects.get_or_create(
+                user=instance.user,
+                date=instance.date,
+                defaults={"office": instance.office},
+            )
             att.office = instance.office
             if instance.check_in_time:
                 att.check_in_time = instance.check_in_time
@@ -573,6 +629,9 @@ class AdminOfflineDecisionSerializer(serializers.Serializer):
         return instance
 
 
+# ============================================================
+# ROSTER
+# ============================================================
 class RosterShiftSerializer(serializers.ModelSerializer):
     class Meta:
         model = RosterShift
@@ -590,9 +649,10 @@ class RosterAssignmentSerializer(serializers.ModelSerializer):
         fields = ["id", "user", "office", "office_name", "date", "shift", "shift_name", "note", "created_at"]
         read_only_fields = ["id", "created_at", "shift_name", "office_name"]
 
-from rest_framework import serializers
-from .models import User
 
+# ============================================================
+# ADMIN USER LIST
+# ============================================================
 class AdminUserListSerializer(serializers.ModelSerializer):
     phone = serializers.SerializerMethodField()
     employee_code = serializers.SerializerMethodField()
@@ -620,11 +680,9 @@ class AdminUserListSerializer(serializers.ModelSerializer):
         return getattr(getattr(obj, "profile", None), "designation", "")
 
 
-# serializers.py (add at bottom)
-
-from rest_framework import serializers
-from .models import DailyReport
-
+# ============================================================
+# DAILY REPORTS
+# ============================================================
 class DailyReportSerializer(serializers.ModelSerializer):
     user_email = serializers.CharField(source="user.email", read_only=True)
     user_name = serializers.CharField(source="user.full_name", read_only=True)

@@ -1,0 +1,20 @@
+[0;1;32m●[0m gunicorn-ccm-att.service - gunicorn daemon for atten-api.escapenormie.cloud (ccm_attendence)
+     Loaded: loaded (/etc/systemd/system/gunicorn-ccm-att.service; enabled; vendor preset: enabled)
+     Active: [0;1;32mactive (running)[0m since Thu 2026-02-05 13:19:37 UTC; 3s ago
+   Main PID: 234835 (gunicorn)
+      Tasks: 4 (limit: 9476)
+     Memory: 98.9M
+        CPU: 884ms
+     CGroup: /system.slice/gunicorn-ccm-att.service
+             ├─234835 /var/www/ccm_attendence/venv/bin/python3 /var/www/ccm_attendence/venv/bin/gunicorn --access-logfile - --workers 3 --bind unix:/var/www/ccm_attendence/ccm_attendence.sock config.wsgi:application
+             ├─234836 /var/www/ccm_attendence/venv/bin/python3 /var/www/ccm_attendence/venv/bin/gunicorn --access-logfile - --workers 3 --bind unix:/var/www/ccm_attendence/ccm_attendence.sock config.wsgi:application
+             ├─234837 /var/www/ccm_attendence/venv/bin/python3 /var/www/ccm_attendence/venv/bin/gunicorn --access-logfile - --workers 3 --bind unix:/var/www/ccm_attendence/ccm_attendence.sock config.wsgi:application
+             └─234838 /var/www/ccm_attendence/venv/bin/python3 /var/www/ccm_attendence/venv/bin/gunicorn --access-logfile - --workers 3 --bind unix:/var/www/ccm_attendence/ccm_attendence.sock config.wsgi:application
+
+Feb 05 13:19:37 srv1282175 systemd[1]: Started gunicorn daemon for atten-api.escapenormie.cloud (ccm_attendence).
+Feb 05 13:19:37 srv1282175 gunicorn[234835]: [2026-02-05 13:19:37 +0000] [234835] [INFO] Starting gunicorn 25.0.0
+Feb 05 13:19:37 srv1282175 gunicorn[234835]: [2026-02-05 13:19:37 +0000] [234835] [INFO] Listening at: unix:/var/www/ccm_attendence/ccm_attendence.sock (234835)
+Feb 05 13:19:37 srv1282175 gunicorn[234835]: [2026-02-05 13:19:37 +0000] [234835] [INFO] Using worker: sync
+Feb 05 13:19:37 srv1282175 gunicorn[234836]: [2026-02-05 13:19:37 +0000] [234836] [INFO] Booting worker with pid: 234836
+Feb 05 13:19:37 srv1282175 gunicorn[234837]: [2026-02-05 13:19:37 +0000] [234837] [INFO] Booting worker with pid: 234837
+Feb 05 13:19:37 srv1282175 gunicorn[234838]: [2026-02-05 13:19:37 +0000] [234838] [INFO] Booting worker with pid: 234838

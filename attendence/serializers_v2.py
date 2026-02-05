@@ -103,15 +103,18 @@ class RegisterSerializer(serializers.Serializer):
             f"This OTP will expire in {expires_min} minutes.\n"
             f"If you did not request this, please ignore this email."
         )
-        from_email = settings.DEFAULT_FROM_EMAIL or settings.EMAIL_HOST_USER
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
+        connection = get_connection()
+        connection.open()
 
+        EmailMessage(
+            subject=subject,
+            body=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[email],
+            connection=connection,
+        ).send()
+
+        connection.close()
 
 
         return user
@@ -221,15 +224,18 @@ class ResendOtpSerializer(serializers.Serializer):
             f"This OTP will expire in {expires_min} minutes.\n"
             f"If you did not request this, please ignore this email."
         )
-        from_email = settings.DEFAULT_FROM_EMAIL or settings.EMAIL_HOST_USER
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
+        connection = get_connection()
+        connection.open()
 
+        EmailMessage(
+            subject=subject,
+            body=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[email],
+            connection=connection,
+        ).send()
+
+        connection.close()
 
 
         return attrs

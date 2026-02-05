@@ -8,7 +8,6 @@ import secrets
 from datetime import timedelta
 
 from .models import User, EmployeeProfile, EmailOTP
-from django.core.mail import EmailMessage, get_connection
 
 
 def _hash_otp(otp: str, salt: str) -> str:
@@ -103,16 +102,7 @@ class RegisterSerializer(serializers.Serializer):
             f"This OTP will expire in {expires_min} minutes.\n"
             f"If you did not request this, please ignore this email."
         )
-        from_email = settings.DEFAULT_FROM_EMAIL or settings.EMAIL_HOST_USER
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
-
-
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=False)
 
         return user
 
@@ -221,16 +211,7 @@ class ResendOtpSerializer(serializers.Serializer):
             f"This OTP will expire in {expires_min} minutes.\n"
             f"If you did not request this, please ignore this email."
         )
-        from_email = settings.DEFAULT_FROM_EMAIL or settings.EMAIL_HOST_USER
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
-
-
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=False)
 
         return attrs
 
