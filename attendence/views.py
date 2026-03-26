@@ -235,14 +235,20 @@ class MyAttendanceListView(APIView):
 
         # ✅ Offline requests
         for o in off_qs:
+            minutes = 0
+            if o.check_in_time and o.check_out_time:
+                diff = o.check_out_time - o.check_in_time
+                minutes = max(int(diff.total_seconds() // 60), 0)
+
             data.append({
                 "id": o.id,
                 "date": o.date,
                 "office_name": o.office.name if o.office else "",
                 "check_in_time": o.check_in_time,
                 "check_out_time": o.check_out_time,
+                "total_work_minutes": minutes,  # ✅ ADD THIS
                 "type": "offline",
-                "status": o.status,  # PENDING / APPROVED / REJECTED
+                "status": o.status,
             })
 
         # Sort by date desc

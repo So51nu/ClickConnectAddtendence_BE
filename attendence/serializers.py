@@ -720,6 +720,11 @@ class OfflineAttendanceSyncSerializer(serializers.Serializer):
                     attendance.check_out_lat = lat
                     attendance.check_out_lng = lng
                     attendance.check_out_accuracy_m = accuracy_m
+
+                    # ✅ MAIN FIX
+                    duration = marked_at - attendance.check_in_time
+                    attendance.total_work_minutes = max(int(duration.total_seconds() // 60), 0)
+
                     attendance.source = Attendance.SOURCE_OFFLINE
                     attendance.save()
                     status_val = "CHECKED_OUT"
@@ -757,30 +762,59 @@ class OfflineAttendanceRequestSerializer(serializers.ModelSerializer):
 
 
 class AdminOfflineDecisionSerializer(serializers.Serializer):
-    status = serializers.ChoiceField(choices=[OfflineAttendanceRequest.STATUS_APPROVED, OfflineAttendanceRequest.STATUS_REJECTED])
+    status = serializers.ChoiceField(
+        choices=[OfflineAttendanceRequest.STATUS_APPROVED, OfflineAttendanceRequest.STATUS_REJECTED]
+    )
     admin_comment = serializers.CharField(required=False, allow_blank=True)
 
-    def update(self, instance: OfflineAttendanceRequest, validated_data):
+    def update(self, instance, validated_data):
+        from django.utils import timezone
+
         instance.status = validated_data["status"]
         instance.admin_comment = validated_data.get("admin_comment", "")
         instance.decided_by = self.context["request"].user
         instance.decided_at = timezone.now()
         instance.save()
 
-        # If approved => create/update Attendance (official)
-        if instance.status == OfflineAttendanceRequest.STATUS_APPROVED:
-            att, _ = Attendance.objects.get_or_create(user=instance.user, date=instance.date, defaults={"office": instance.office})
-            att.office = instance.office
-            if instance.check_in_time:
+        # 🔥 APPROVED LOGIC
+        if instance.status == "APPROVED":
+
+            print("🔥 APPROVED HIT")
+
+            att = Attendance.objects.filter(
+                user=instance.user,
+                date=instance.date
+            ).first()
+
+            if not att:
+                print("🔥 CREATING ATTENDANCE")
+
+                att = Attendance.objects.create(
+                    user=instance.user,
+                    office=instance.office,
+                    date=instance.date,
+                    check_in_time=instance.check_in_time,
+                    check_out_time=instance.check_out_time,
+                    source=Attendance.SOURCE_OFFLINE
+                )
+            else:
+                print("🔥 UPDATING ATTENDANCE")
+
+                att.office = instance.office
                 att.check_in_time = instance.check_in_time
-            if instance.check_out_time:
                 att.check_out_time = instance.check_out_time
-            att.source = Attendance.SOURCE_OFFLINE
+                att.source = Attendance.SOURCE_OFFLINE
+
+            # ✅ TIME CALCULATION
+            if att.check_in_time and att.check_out_time:
+                diff = att.check_out_time - att.check_in_time
+                att.total_work_minutes = max(int(diff.total_seconds() // 60), 0)
+            else:
+                att.total_work_minutes = 0
+
             att.save()
 
         return instance
-
-
 class RosterShiftSerializer(serializers.ModelSerializer):
     class Meta:
         model = RosterShift
