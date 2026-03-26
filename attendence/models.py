@@ -77,13 +77,20 @@ class EmployeeProfile(models.Model):
     def __str__(self):
         return f"Profile({self.user.email})"
 
-
 class EmailOTP(models.Model):
     """
-    OTP store as hash (security). One purpose for now: REGISTER_VERIFY
+    OTP store as hash (security).
+    Purposes:
+      - REGISTER_VERIFY
+      - PASSWORD_RESET
     """
     PURPOSE_REGISTER_VERIFY = "REGISTER_VERIFY"
-    PURPOSE_CHOICES = [(PURPOSE_REGISTER_VERIFY, "Register Verify")]
+    PURPOSE_PASSWORD_RESET = "PASSWORD_RESET"
+
+    PURPOSE_CHOICES = [
+        (PURPOSE_REGISTER_VERIFY, "Register Verify"),
+        (PURPOSE_PASSWORD_RESET, "Password Reset"),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(db_index=True)
@@ -106,8 +113,6 @@ class EmailOTP(models.Model):
 
     def __str__(self):
         return f"OTP({self.email}, {self.purpose}, used={self.is_used})"
-
-from django.db import models
 from django.utils import timezone
 from django.conf import settings
 import uuid
@@ -183,6 +188,24 @@ class Attendance(models.Model):
     def __str__(self):
         return f"Attendance({self.user.email}, {self.date}, {self.office.name})"
 
+class OfflineAttendanceSyncLog(models.Model):
+    """
+    Client-side queued attendance event log to avoid duplicate sync.
+    """
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="offline_sync_logs")
+    local_event_id = models.CharField(max_length=120)
+    action = models.CharField(max_length=10)  # CHECKIN / CHECKOUT
+    attendance = models.ForeignKey("Attendance", on_delete=models.SET_NULL, null=True, blank=True, related_name="offline_sync_logs")
+    synced_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("user", "local_event_id")
+        indexes = [
+            models.Index(fields=["user", "local_event_id"]),
+        ]
+
+    def __str__(self):
+        return f"OfflineSyncLog({self.user.email}, {self.local_event_id}, {self.action})"
 
 from django.db import models
 from django.conf import settings

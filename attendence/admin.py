@@ -43,11 +43,10 @@ class AttendanceAdmin(admin.ModelAdmin):
     list_filter = ("office", "date", "source")
     search_fields = ("user__email", "office__name")
 
-from django.contrib import admin
 from .models import (
     LeaveRequest, RegularizationRequest, ResignationRequest,
     EmployeeDocument, ESICProfile, OfflineAttendanceRequest,
-    RosterShift, RosterAssignment
+    RosterShift, RosterAssignment, DailyReport, OfflineAttendanceSyncLog
 )
 
 admin.site.register(LeaveRequest)
@@ -58,3 +57,6 @@ admin.site.register(ESICProfile)
 admin.site.register(OfflineAttendanceRequest)
 admin.site.register(RosterShift)
 admin.site.register(RosterAssignment)
+
+admin.site.register(DailyReport)
+admin.site.register(OfflineAttendanceSyncLog)

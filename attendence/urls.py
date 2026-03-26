@@ -61,7 +61,8 @@ from .views import (
     MyRosterView, AdminShiftListCreateView, AdminRosterAssignView, AdminUserListView, AdminAttendanceReportView, AdminAttendanceExportView,
     AdminDashboardSummaryView,MyDailyReportListCreateView,
     AdminDailyReportListView,
-    AdminDailyReportExportPDFView,MyDailyReportExportPDFView,MyDailyReportUpdateView,
+    AdminDailyReportExportPDFView,MyDailyReportExportPDFView,MyDailyReportUpdateView,ForgotPasswordRequestView, ForgotPasswordVerifyView, ForgotPasswordResetView,
+    OfflineAttendanceSyncView,
 
 )
 
@@ -71,6 +72,9 @@ urlpatterns = [
     path("auth/verify-otp/", VerifyOtpView.as_view(), name="verify_otp"),
     path("auth/resend-otp/", ResendOtpView.as_view(), name="resend_otp"),
     path("auth/login/", LoginView.as_view(), name="login"),
+    path("auth/forgot-password/request/", ForgotPasswordRequestView.as_view(), name="forgot_password_request"),
+    path("auth/forgot-password/verify/", ForgotPasswordVerifyView.as_view(), name="forgot_password_verify"),
+    path("auth/forgot-password/reset/", ForgotPasswordResetView.as_view(), name="forgot_password_reset"),
     path("auth/refresh/", TokenRefreshView.as_view(), name="refresh"),
     path("auth/me/", MeView.as_view(), name="me"),
 
@@ -78,7 +82,7 @@ urlpatterns = [
     path("attendance/mark/", AttendanceMarkView.as_view(), name="attendance_mark"),
     path("attendance/me/", MyAttendanceListView.as_view(), name="my_attendance_list"),
     path("attendance/today/", TodayAttendanceStatusView.as_view(), name="today_attendance_status"),
-
+    path("attendance/sync-offline/", OfflineAttendanceSyncView.as_view(), name="attendance_sync_offline"),
     # Admin Offices
     path("admin/offices/", AdminOfficeListCreateView.as_view(), name="admin_offices"),
     path("admin/offices/<int:office_id>/", AdminOfficeUpdateView.as_view(), name="admin_office_update"),

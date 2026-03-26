@@ -19,6 +19,63 @@ def _generate_otp() -> str:
     # 6-digit OTP
     return f"{secrets.randbelow(10**6):06d}"
 
+def _invalidate_old_unused_otps(email: str, purpose: str):
+    EmailOTP.objects.filter(
+        email=email,
+        purpose=purpose,
+        is_used=False
+    ).update(is_used=True)
+
+
+def _create_and_send_email_otp(email: str, purpose: str, subject: str):
+    now = timezone.now()
+    one_hour_ago = now - timedelta(hours=1)
+
+    last_otp = EmailOTP.objects.filter(email=email, purpose=purpose).order_by("-created_at").first()
+    if last_otp:
+        cooldown = getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60)
+        if (now - last_otp.last_sent_at).total_seconds() < cooldown:
+            raise serializers.ValidationError({"detail": f"Please wait {cooldown} seconds before requesting OTP again."})
+
+    hourly_count = EmailOTP.objects.filter(
+        email=email,
+        purpose=purpose,
+        created_at__gte=one_hour_ago
+    ).count()
+    max_per_hour = getattr(settings, "OTP_MAX_SEND_PER_HOUR", 5)
+    if hourly_count >= max_per_hour:
+        raise serializers.ValidationError({"detail": "OTP limit reached. Try again later."})
+
+    _invalidate_old_unused_otps(email, purpose)
+
+    otp = _generate_otp()
+    salt = secrets.token_hex(8)
+    otp_hash = _hash_otp(otp, salt)
+
+    expires_min = getattr(settings, "OTP_EXPIRY_MINUTES", 10)
+    expires_at = now + timedelta(minutes=expires_min)
+
+    EmailOTP.objects.create(
+        email=email,
+        purpose=purpose,
+        otp_hash=otp_hash,
+        salt=salt,
+        expires_at=expires_at,
+        is_used=False
+    )
+
+    send_mail(
+        subject=subject,
+        message=(
+            f"Your OTP is: {otp}\n\n"
+            f"This OTP will expire in {expires_min} minutes.\n"
+            f"If you did not request this, please ignore this email."
+        ),
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[email],
+        fail_silently=False,
+    )
+
 
 class RegisterSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -58,63 +115,18 @@ class RegisterSerializer(serializers.Serializer):
             profile = user.profile
             profile.phone = phone
             profile.save()
-
-        # OTP throttle: max send per hour + cooldown
-        now = timezone.now()
-        one_hour_ago = now - timedelta(hours=1)
-        last_otp = EmailOTP.objects.filter(email=email, purpose=EmailOTP.PURPOSE_REGISTER_VERIFY).order_by("-created_at").first()
-
-        if last_otp:
-            # cooldown check
-            cooldown = getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60)
-            if (now - last_otp.last_sent_at).total_seconds() < cooldown:
-                raise serializers.ValidationError({"detail": f"Please wait {cooldown} seconds before requesting OTP again."})
-
-            # hourly send limit (rough)
-            hourly_count = EmailOTP.objects.filter(
-                email=email,
-                purpose=EmailOTP.PURPOSE_REGISTER_VERIFY,
-                created_at__gte=one_hour_ago
-            ).count()
-            max_per_hour = getattr(settings, "OTP_MAX_SEND_PER_HOUR", 5)
-            if hourly_count >= max_per_hour:
-                raise serializers.ValidationError({"detail": "OTP limit reached. Try again later."})
-
-        otp = _generate_otp()
-        salt = secrets.token_hex(8)
-        otp_hash = _hash_otp(otp, salt)
-
-        expires_min = getattr(settings, "OTP_EXPIRY_MINUTES", 10)
-        expires_at = now + timedelta(minutes=expires_min)
-
-        EmailOTP.objects.create(
+        _create_and_send_email_otp(
             email=email,
             purpose=EmailOTP.PURPOSE_REGISTER_VERIFY,
-            otp_hash=otp_hash,
-            salt=salt,
-            expires_at=expires_at,
-            is_used=False
+            subject="Your Attendance App OTP"
         )
-
-        # Send email
-        subject = "Your Attendance App OTP"
-        message = (
-            f"Your OTP is: {otp}\n\n"
-            f"This OTP will expire in {expires_min} minutes.\n"
-            f"If you did not request this, please ignore this email."
-        )
-        from_email = settings.DEFAULT_FROM_EMAIL or settings.EMAIL_HOST_USER
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
-
-
 
         return user
+
+
+
+
+        
 
 
 class VerifyOtpSerializer(serializers.Serializer):
@@ -182,58 +194,12 @@ class ResendOtpSerializer(serializers.Serializer):
 
         now = timezone.now()
         one_hour_ago = now - timedelta(hours=1)
-
-        # cooldown + per hour limit
-        last_otp = EmailOTP.objects.filter(email=email, purpose=EmailOTP.PURPOSE_REGISTER_VERIFY).order_by("-created_at").first()
-        if last_otp:
-            cooldown = getattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 60)
-            if (now - last_otp.last_sent_at).total_seconds() < cooldown:
-                raise serializers.ValidationError({"detail": f"Please wait {cooldown} seconds before requesting OTP again."})
-
-        hourly_count = EmailOTP.objects.filter(
+        _create_and_send_email_otp(
             email=email,
             purpose=EmailOTP.PURPOSE_REGISTER_VERIFY,
-            created_at__gte=one_hour_ago
-        ).count()
-        max_per_hour = getattr(settings, "OTP_MAX_SEND_PER_HOUR", 5)
-        if hourly_count >= max_per_hour:
-            raise serializers.ValidationError({"detail": "OTP limit reached. Try again later."})
-
-        otp = _generate_otp()
-        salt = secrets.token_hex(8)
-        otp_hash = _hash_otp(otp, salt)
-
-        expires_min = getattr(settings, "OTP_EXPIRY_MINUTES", 10)
-        expires_at = now + timedelta(minutes=expires_min)
-
-        EmailOTP.objects.create(
-            email=email,
-            purpose=EmailOTP.PURPOSE_REGISTER_VERIFY,
-            otp_hash=otp_hash,
-            salt=salt,
-            expires_at=expires_at,
-            is_used=False
+            subject="Your Attendance App OTP (Resend)"
         )
-
-        subject = "Your Attendance App OTP (Resend)"
-        message = (
-            f"Your OTP is: {otp}\n\n"
-            f"This OTP will expire in {expires_min} minutes.\n"
-            f"If you did not request this, please ignore this email."
-        )
-        from_email = settings.DEFAULT_FROM_EMAIL or settings.EMAIL_HOST_USER
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
-
-
-
         return attrs
-
 
 class MeSerializer(serializers.ModelSerializer):
     phone = serializers.SerializerMethodField()
@@ -257,6 +223,117 @@ class MeSerializer(serializers.ModelSerializer):
     def get_designation(self, obj):
         return getattr(getattr(obj, "profile", None), "designation", "")
 
+class ForgotPasswordRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+    @transaction.atomic
+    def validate(self, attrs):
+        email = attrs["email"]
+
+        user = User.objects.filter(email=email).first()
+        if not user:
+            # security reason ke liye same generic response
+            return attrs
+
+        _create_and_send_email_otp(
+            email=email,
+            purpose=EmailOTP.PURPOSE_PASSWORD_RESET,
+            subject="Your Password Reset OTP"
+        )
+        return attrs
+
+
+class ForgotPasswordVerifySerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(min_length=6, max_length=6)
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+    def validate(self, attrs):
+        email = attrs["email"]
+        otp = attrs["otp"].strip()
+
+        user = User.objects.filter(email=email).first()
+        if not user:
+            raise serializers.ValidationError({"email": "User not found."})
+
+        otp_obj = EmailOTP.objects.filter(
+            email=email,
+            purpose=EmailOTP.PURPOSE_PASSWORD_RESET,
+            is_used=False
+        ).order_by("-created_at").first()
+
+        if not otp_obj:
+            raise serializers.ValidationError({"otp": "OTP not found. Please request a new OTP."})
+
+        if timezone.now() > otp_obj.expires_at:
+            raise serializers.ValidationError({"otp": "OTP expired. Please request a new OTP."})
+
+        if _hash_otp(otp, otp_obj.salt) != otp_obj.otp_hash:
+            raise serializers.ValidationError({"otp": "Invalid OTP."})
+
+        return attrs
+
+
+class ForgotPasswordResetSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(min_length=6, max_length=6)
+    new_password = serializers.CharField(min_length=8, write_only=True)
+
+    def validate_email(self, value):
+        return value.lower().strip()
+
+    @transaction.atomic
+    def validate(self, attrs):
+        email = attrs["email"]
+        otp = attrs["otp"].strip()
+
+        user = User.objects.filter(email=email).first()
+        if not user:
+            raise serializers.ValidationError({"email": "User not found."})
+
+        otp_obj = EmailOTP.objects.filter(
+            email=email,
+            purpose=EmailOTP.PURPOSE_PASSWORD_RESET,
+            is_used=False
+        ).order_by("-created_at").first()
+
+        if not otp_obj:
+            raise serializers.ValidationError({"otp": "OTP not found. Please request a new OTP."})
+
+        if timezone.now() > otp_obj.expires_at:
+            raise serializers.ValidationError({"otp": "OTP expired. Please request a new OTP."})
+
+        if _hash_otp(otp, otp_obj.salt) != otp_obj.otp_hash:
+            raise serializers.ValidationError({"otp": "Invalid OTP."})
+
+        attrs["user"] = user
+        attrs["otp_obj"] = otp_obj
+        return attrs
+
+    @transaction.atomic
+    def save(self, **kwargs):
+        user = self.validated_data["user"]
+        otp_obj = self.validated_data["otp_obj"]
+        new_password = self.validated_data["new_password"]
+
+        user.set_password(new_password)
+        user.save()
+
+        otp_obj.is_used = True
+        otp_obj.save()
+
+        EmailOTP.objects.filter(
+            email=user.email,
+            purpose=EmailOTP.PURPOSE_PASSWORD_RESET,
+            is_used=False
+        ).exclude(id=otp_obj.id).update(is_used=True)
+
+        return user
 from rest_framework import serializers
 from django.utils import timezone
 from django.db import transaction
@@ -339,7 +416,11 @@ class AttendanceMarkSerializer(serializers.Serializer):
 
         if action == "CHECKIN":
             if attendance and attendance.check_in_time:
-                return {"status": "ALREADY_CHECKED_IN", "attendance_id": attendance.id}
+                 return {
+                    "status": "ALREADY_CHECKED_IN",
+                    "attendance_id": attendance.id,
+                    "time": attendance.check_in_time.isoformat() if attendance.check_in_time else None,
+                }
 
             if not attendance:
                 attendance = Attendance.objects.create(
@@ -361,14 +442,22 @@ class AttendanceMarkSerializer(serializers.Serializer):
                 attendance.check_in_accuracy_m = accuracy_m
                 attendance.save()
 
-            return {"status": "CHECKED_IN", "attendance_id": attendance.id}
+            return {
+                "status": "CHECKED_IN",
+                "attendance_id": attendance.id,
+                "time": attendance.check_in_time.isoformat() if attendance.check_in_time else now.isoformat(),
+            }
 
         # CHECKOUT
         if not attendance or not attendance.check_in_time:
             raise serializers.ValidationError({"detail": "You must CHECKIN first."})
 
         if attendance.check_out_time:
-            return {"status": "ALREADY_CHECKED_OUT", "attendance_id": attendance.id}
+            return {
+                "status": "ALREADY_CHECKED_OUT",
+                "attendance_id": attendance.id,
+                "time": attendance.check_out_time.isoformat() if attendance.check_out_time else None,
+            }
 
         attendance.check_out_time = now
         attendance.check_out_lat = lat
@@ -376,7 +465,11 @@ class AttendanceMarkSerializer(serializers.Serializer):
         attendance.check_out_accuracy_m = accuracy_m
         attendance.save()
 
-        return {"status": "CHECKED_OUT", "attendance_id": attendance.id}
+        return {
+            "status": "CHECKED_OUT",
+            "attendance_id": attendance.id,
+            "time": attendance.check_out_time.isoformat() if attendance.check_out_time else now.isoformat(),
+        }
 
 
 class AttendanceListSerializer(serializers.ModelSerializer):
@@ -530,7 +623,138 @@ class ESICProfileSerializer(serializers.ModelSerializer):
         fields = ["esic_number", "dispensary", "branch_office", "updated_at"]
         read_only_fields = ["updated_at"]
 
+from django.utils.dateparse import parse_datetime
+from .models import OfflineAttendanceSyncLog
 
+
+class OfflineAttendanceSyncItemSerializer(serializers.Serializer):
+    local_event_id = serializers.CharField(max_length=120)
+    action = serializers.ChoiceField(choices=["CHECKIN", "CHECKOUT"])
+    qr_token = serializers.CharField(max_length=80)
+    lat = serializers.FloatField()
+    lng = serializers.FloatField()
+    accuracy_m = serializers.FloatField(required=False, allow_null=True)
+    client_marked_at = serializers.CharField()
+
+    def validate(self, attrs):
+        qr_token = attrs["qr_token"].strip()
+        qr = OfficeQR.objects.select_related("office").filter(
+            qr_token=qr_token,
+            is_active=True,
+            office__is_active=True
+        ).first()
+        if not qr:
+            raise serializers.ValidationError({"qr_token": "Invalid or inactive QR."})
+
+        office = qr.office
+        lat = attrs["lat"]
+        lng = attrs["lng"]
+
+        dist_m = haversine_m(lat, lng, office.latitude, office.longitude)
+        if dist_m > office.allowed_radius_m:
+            raise serializers.ValidationError({
+                "detail": f"Outside allowed location radius. Distance={int(dist_m)}m, Allowed={office.allowed_radius_m}m"
+            })
+
+        dt = parse_datetime(attrs["client_marked_at"])
+        if not dt:
+            raise serializers.ValidationError({"client_marked_at": "Invalid datetime format."})
+
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone.get_current_timezone())
+
+        attrs["office"] = office
+        attrs["distance_m"] = dist_m
+        attrs["client_dt"] = dt
+        return attrs
+
+
+class OfflineAttendanceSyncSerializer(serializers.Serializer):
+    events = OfflineAttendanceSyncItemSerializer(many=True)
+
+    @transaction.atomic
+    def create(self, validated_data):
+        user = self.context["request"].user
+        results = []
+
+        for item in validated_data["events"]:
+            local_event_id = item["local_event_id"]
+
+            already = OfflineAttendanceSyncLog.objects.filter(
+                user=user,
+                local_event_id=local_event_id
+            ).first()
+            if already:
+                results.append({
+                    "local_event_id": local_event_id,
+                    "status": "ALREADY_SYNCED",
+                })
+                continue
+
+            office = item["office"]
+            action = item["action"]
+            lat = item["lat"]
+            lng = item["lng"]
+            accuracy_m = item.get("accuracy_m")
+            marked_at = timezone.localtime(item["client_dt"])
+            att_date = marked_at.date()
+
+            attendance = Attendance.objects.select_for_update().filter(user=user, date=att_date).first()
+
+            if action == "CHECKIN":
+                if attendance and attendance.check_in_time:
+                    status_val = "ALREADY_CHECKED_IN"
+                else:
+                    if not attendance:
+                        attendance = Attendance.objects.create(
+                            user=user,
+                            office=office,
+                            date=att_date,
+                            check_in_time=marked_at,
+                            check_in_lat=lat,
+                            check_in_lng=lng,
+                            check_in_accuracy_m=accuracy_m,
+                            source=Attendance.SOURCE_OFFLINE,
+                        )
+                    else:
+                        attendance.office = office
+                        attendance.check_in_time = marked_at
+                        attendance.check_in_lat = lat
+                        attendance.check_in_lng = lng
+                        attendance.check_in_accuracy_m = accuracy_m
+                        attendance.source = Attendance.SOURCE_OFFLINE
+                        attendance.save()
+
+                    status_val = "CHECKED_IN"
+
+            else:  # CHECKOUT
+                if not attendance or not attendance.check_in_time:
+                    status_val = "CHECKIN_REQUIRED"
+                elif attendance.check_out_time:
+                    status_val = "ALREADY_CHECKED_OUT"
+                else:
+                    attendance.check_out_time = marked_at
+                    attendance.check_out_lat = lat
+                    attendance.check_out_lng = lng
+                    attendance.check_out_accuracy_m = accuracy_m
+                    attendance.source = Attendance.SOURCE_OFFLINE
+                    attendance.save()
+                    status_val = "CHECKED_OUT"
+
+            OfflineAttendanceSyncLog.objects.create(
+                user=user,
+                local_event_id=local_event_id,
+                action=action,
+                attendance=attendance if 'attendance' in locals() else None,
+            )
+
+            results.append({
+                "local_event_id": local_event_id,
+                "status": status_val,
+                "time": marked_at.isoformat(),
+            })
+
+        return {"results": results}
 class OfflineAttendanceRequestSerializer(serializers.ModelSerializer):
     office_name = serializers.CharField(source="office.name", read_only=True)
     

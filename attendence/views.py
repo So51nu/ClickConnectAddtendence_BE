@@ -58,6 +58,10 @@ from .serializers import (
     AdminUserListSerializer,
 
     DailyReportSerializer,
+    ForgotPasswordRequestSerializer,
+    ForgotPasswordVerifySerializer,
+    ForgotPasswordResetSerializer,
+    OfflineAttendanceSyncSerializer,
 )
 
 from .models import (
@@ -76,8 +80,9 @@ from .models import (
 
     RosterShift,
     RosterAssignment,
-
+    OfflineAttendanceSyncLog,
     DailyReport,
+
 )
 
 
@@ -145,6 +150,37 @@ class LoginView(TokenObtainPairView):
     permission_classes = [permissions.AllowAny]
     serializer_class = CustomTokenObtainPairSerializer
 
+class ForgotPasswordRequestView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        ser = ForgotPasswordRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        return Response(
+            {"detail": "If the email exists, an OTP has been sent."},
+            status=status.HTTP_200_OK
+        )
+
+
+class ForgotPasswordVerifyView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        ser = ForgotPasswordVerifySerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        return Response({"detail": "OTP verified successfully."}, status=status.HTTP_200_OK)
+
+
+class ForgotPasswordResetView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        ser = ForgotPasswordResetSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response({"detail": "Password reset successfully."}, status=status.HTTP_200_OK)
+    
+
 
 class MeView(APIView):
     permission_classes = [IsAuthenticated]
@@ -163,7 +199,17 @@ class AttendanceMarkView(APIView):
         result = ser.save()
         return Response(result, status=status.HTTP_200_OK)
 
+class OfflineAttendanceSyncView(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def post(self, request):
+        ser = OfflineAttendanceSyncSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        result = ser.save()
+        return Response(result, status=status.HTTP_200_OK)
+    
+
+    
 class MyAttendanceListView(APIView):
     def get(self, request):
         qs = Attendance.objects.filter(user=request.user).select_related("office").order_by("-date")
