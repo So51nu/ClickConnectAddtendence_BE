@@ -62,7 +62,7 @@ from .views import (
     AdminDashboardSummaryView,MyDailyReportListCreateView,
     AdminDailyReportListView,
     AdminDailyReportExportPDFView,MyDailyReportExportPDFView,MyDailyReportUpdateView,ForgotPasswordRequestView, ForgotPasswordVerifyView, ForgotPasswordResetView,
-    OfflineAttendanceSyncView,
+    OfflineAttendanceSyncView,PublicOfficeListView
 
 )
 
@@ -83,6 +83,7 @@ urlpatterns = [
     path("attendance/me/", MyAttendanceListView.as_view(), name="my_attendance_list"),
     path("attendance/today/", TodayAttendanceStatusView.as_view(), name="today_attendance_status"),
     path("attendance/sync-offline/", OfflineAttendanceSyncView.as_view(), name="attendance_sync_offline"),
+    path("offices/", PublicOfficeListView.as_view()),
     # Admin Offices
     path("admin/offices/", AdminOfficeListCreateView.as_view(), name="admin_offices"),
     path("admin/offices/<int:office_id>/", AdminOfficeUpdateView.as_view(), name="admin_office_update"),

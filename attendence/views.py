@@ -212,23 +212,43 @@ class OfflineAttendanceSyncView(APIView):
     
 class MyAttendanceListView(APIView):
     def get(self, request):
-        qs = Attendance.objects.filter(user=request.user).select_related("office").order_by("-date")
+        # Normal attendance
+        att_qs = Attendance.objects.filter(user=request.user).select_related("office")
 
-        from_date = request.query_params.get("from")
-        to_date = request.query_params.get("to")
+        # Offline requests
+        off_qs = OfflineAttendanceRequest.objects.filter(user=request.user).select_related("office")
 
-        if from_date:
-            qs = qs.filter(date__gte=from_date)
-        if to_date:
-            qs = qs.filter(date__lte=to_date)
+        data = []
 
-        if not from_date and not to_date:
-            qs = qs[:30]
+        # ✅ Normal attendance
+        for a in att_qs:
+            data.append({
+                "id": a.id,
+                "date": a.date,
+                "office_name": a.office.name if a.office else "",
+                "check_in_time": a.check_in_time,
+                "check_out_time": a.check_out_time,
+                "total_work_minutes": a.total_work_minutes,
+                "type": "attendance",
+                "status": "DONE",
+            })
 
-        data = AttendanceListSerializer(qs, many=True).data
-        return Response(data, status=status.HTTP_200_OK)
+        # ✅ Offline requests
+        for o in off_qs:
+            data.append({
+                "id": o.id,
+                "date": o.date,
+                "office_name": o.office.name if o.office else "",
+                "check_in_time": o.check_in_time,
+                "check_out_time": o.check_out_time,
+                "type": "offline",
+                "status": o.status,  # PENDING / APPROVED / REJECTED
+            })
 
+        # Sort by date desc
+        data.sort(key=lambda x: x["date"], reverse=True)
 
+        return Response(data)
 class TodayAttendanceStatusView(APIView):
     def get(self, request):
         today = localdate()
@@ -505,6 +525,12 @@ class AdminOfflineAttendanceListView(APIView):
             qs = qs.filter(status=status_q)
         return Response(OfflineAttendanceRequestSerializer(qs, many=True).data)
 
+class PublicOfficeListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        offices = OfficeLocation.objects.filter(is_active=True).order_by("name")
+        return Response(OfficeLocationSerializer(offices, many=True).data, status=200)
 
 class AdminOfflineAttendanceDecideView(APIView):
     permission_classes = [IsAdminUser]

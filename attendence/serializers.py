@@ -406,21 +406,15 @@ class AttendanceMarkSerializer(serializers.Serializer):
         action = validated_data["action"]
         lat = validated_data["lat"]
         lng = validated_data["lng"]
-        accuracy_m = validated_data.get("accuracy_m", None)
 
-        today = localdate()  # Asia/Kolkata settings ke hisaab se
-
-        attendance = Attendance.objects.select_for_update().filter(user=user, date=today).first()
-
+        today = localdate()
+        attendance = Attendance.objects.filter(user=user, date=today).first()
         now = timezone.now()
 
+        # ✅ CHECKIN
         if action == "CHECKIN":
             if attendance and attendance.check_in_time:
-                 return {
-                    "status": "ALREADY_CHECKED_IN",
-                    "attendance_id": attendance.id,
-                    "time": attendance.check_in_time.isoformat() if attendance.check_in_time else None,
-                }
+                return {"status": "ALREADY_CHECKED_IN"}
 
             if not attendance:
                 attendance = Attendance.objects.create(
@@ -430,45 +424,34 @@ class AttendanceMarkSerializer(serializers.Serializer):
                     check_in_time=now,
                     check_in_lat=lat,
                     check_in_lng=lng,
-                    check_in_accuracy_m=accuracy_m,
-                    source=Attendance.SOURCE_ONLINE,
                 )
             else:
-                # attendance exists but no checkin yet
-                attendance.office = office
                 attendance.check_in_time = now
-                attendance.check_in_lat = lat
-                attendance.check_in_lng = lng
-                attendance.check_in_accuracy_m = accuracy_m
                 attendance.save()
 
-            return {
-                "status": "CHECKED_IN",
-                "attendance_id": attendance.id,
-                "time": attendance.check_in_time.isoformat() if attendance.check_in_time else now.isoformat(),
-            }
+            return {"status": "CHECKED_IN"}
 
-        # CHECKOUT
+        # ✅ CHECKOUT
         if not attendance or not attendance.check_in_time:
-            raise serializers.ValidationError({"detail": "You must CHECKIN first."})
+            return {"error": "CHECKIN FIRST"}
 
         if attendance.check_out_time:
-            return {
-                "status": "ALREADY_CHECKED_OUT",
-                "attendance_id": attendance.id,
-                "time": attendance.check_out_time.isoformat() if attendance.check_out_time else None,
-            }
+            return {"status": "ALREADY_CHECKED_OUT"}
 
         attendance.check_out_time = now
+
+        # 🔥 TOTAL TIME CALCULATION
+        duration = now - attendance.check_in_time
+        attendance.total_work_minutes = int(duration.total_seconds() // 60)
+
         attendance.check_out_lat = lat
         attendance.check_out_lng = lng
-        attendance.check_out_accuracy_m = accuracy_m
+
         attendance.save()
 
         return {
             "status": "CHECKED_OUT",
-            "attendance_id": attendance.id,
-            "time": attendance.check_out_time.isoformat() if attendance.check_out_time else now.isoformat(),
+            "total_work_minutes": attendance.total_work_minutes
         }
 
 
@@ -767,6 +750,7 @@ class OfflineAttendanceRequestSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "user", "status", "admin_comment", "decided_by", "decided_at", "created_at", "office_name"
         ]
+    
 
     def create(self, validated_data):
         return OfflineAttendanceRequest.objects.create(user=self.context["request"].user, **validated_data)

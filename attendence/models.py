@@ -165,7 +165,7 @@ class Attendance(models.Model):
 
     check_in_time = models.DateTimeField(null=True, blank=True)
     check_out_time = models.DateTimeField(null=True, blank=True)
-
+    total_work_minutes = models.PositiveIntegerField(default=0)
     check_in_lat = models.FloatField(null=True, blank=True)
     check_in_lng = models.FloatField(null=True, blank=True)
     check_in_accuracy_m = models.FloatField(null=True, blank=True)
